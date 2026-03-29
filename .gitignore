@@ -1,0 +1,12 @@
+# Binaries
+*.exe
+x4-analyzer
+
+# Project specific data
+data/
+game-data/
+
+# Go
+vendor/
+*.test
+*.out
