@@ -54,7 +54,7 @@ func TestBuildMacroMap(t *testing.T) {
 	}
 
 	// Verify manual override
-	if got := macroMap["landmarks_kha_nest_01_macro"]; got != "Kha'ak Installation" {
-		t.Errorf("Expected manual override 'Kha'ak Installation', got %q", got)
+	if got := macroMap["landmarks_kha_nest_01_macro"]; got != "Kha'ak Nest Installation" {
+		t.Errorf("Expected manual override 'Kha'ak Nest Installation', got %q", got)
 	}
 }
