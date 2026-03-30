@@ -32,7 +32,10 @@ func TestBasicScan(t *testing.T) {
 
 	scanner := NewX4SaveScanner("dummy.xml")
 	// Mock macroMap
-	scanner.macroMap = map[string]string{"cluster_name": "Test System"}
+	scanner.macroMap = map[string]string{
+		"cluster_name": "Test System",
+		"sector_name":  "Test Sector Name",
+	}
 
 	reader := strings.NewReader(sampleXML)
 	results, err := scanner.ScanReader(reader, "MyShip", false, false, false)
@@ -59,8 +62,8 @@ func TestBasicScan(t *testing.T) {
 	if ship.Owner != "player" {
 		t.Errorf("Expected owner player, got %s", ship.Owner)
 	}
-	if ship.Sector != "SEC_01" {
-		t.Errorf("Expected sector SEC_01, got %s", ship.Sector)
+	if ship.Sector != "Test Sector Name" {
+		t.Errorf("Expected sector 'Test Sector Name', got %s", ship.Sector)
 	}
 	if ship.System != "Test System" {
 		t.Errorf("Expected system Test System, got %s", ship.System)

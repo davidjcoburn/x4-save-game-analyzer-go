@@ -89,7 +89,10 @@ func (s *X4SaveScanner) resolveHierarchy(targetID string, idToInfo map[string]co
 		}
 
 		if info.class == "sector" && sectorCode == "Unknown" {
-			if info.code != "" {
+			// Try to get friendly name from macro first
+			if name, ok := s.macroMap[strings.ToLower(info.macro)]; ok {
+				sectorCode = name
+			} else if info.code != "" {
 				sectorCode = info.code
 			} else {
 				sectorCode = info.macro
