@@ -1,11 +1,14 @@
+// Package analyzer provides tools for analyzing X4: Foundations save games.
 package analyzer
 
+// Vector3 represents a 3D position in the X4 universe.
 type Vector3 struct {
 	X float64 `json:"x" xml:"x,attr"`
 	Y float64 `json:"y" xml:"y,attr"`
 	Z float64 `json:"z" xml:"z,attr"`
 }
 
+// componentInfo is an internal structure used to store intermediate component data.
 type componentInfo struct {
 	parent string
 	pos    *Vector3
@@ -14,6 +17,7 @@ type componentInfo struct {
 	code   string
 }
 
+// ScanResult contains information about a specific component found in the save game.
 type ScanResult struct {
 	ID          string  `json:"id"`
 	Type        string  `json:"type,omitempty"`
@@ -29,6 +33,7 @@ type ScanResult struct {
 	Pos         Vector3 `json:"pos"`
 }
 
+// AnalysisResults aggregates all discovered items categorized by type.
 type AnalysisResults struct {
 	Info    map[string]string `json:"info"`
 	Khaak   []ScanResult      `json:"khaak"`
@@ -37,6 +42,7 @@ type AnalysisResults struct {
 	Vaults  []ScanResult      `json:"vaults"`
 }
 
+// NewAnalysisResults creates and initializes a new AnalysisResults instance.
 func NewAnalysisResults() *AnalysisResults {
 	return &AnalysisResults{
 		Info:    make(map[string]string),

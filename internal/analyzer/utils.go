@@ -1,3 +1,4 @@
+// Package analyzer provides tools for analyzing X4: Foundations save games.
 package analyzer
 
 import (
@@ -6,6 +7,7 @@ import (
 	"strconv"
 )
 
+// FormatCredits converts a centicredit string value to a human-readable credit format.
 func FormatCredits(centiCredits string) string {
 	if centiCredits == "" {
 		return "N/A"
@@ -18,6 +20,7 @@ func FormatCredits(centiCredits string) string {
 	return fmt.Sprintf("%.2f Cr", creditsVal)
 }
 
+// FormatGameTime converts a duration in seconds (as string) to a human-readable day/hour/minute/second format.
 func FormatGameTime(secondsStr string) string {
 	if secondsStr == "" {
 		return "N/A"
@@ -49,6 +52,7 @@ func FormatGameTime(secondsStr string) string {
 	return res
 }
 
+// FormatCoord converts a coordinate value from meters to a human-readable kilometer format.
 func FormatCoord(v float64) string {
 	return fmt.Sprintf("%.1fkm", v/MeterToKm)
 }

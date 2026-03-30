@@ -1,3 +1,4 @@
+// Package analyzer provides tools for analyzing X4: Foundations save games.
 package analyzer
 
 import (
@@ -15,12 +16,13 @@ import (
 //go:embed macro_map.json
 var defaultMacroMap []byte
 
-// X4SaveScanner processes X4 save game XML streams.
+// X4SaveScanner processes X4 save game XML streams to extract specific information.
 type X4SaveScanner struct {
 	filePath string
 	macroMap map[string]string
 }
 
+// NewX4SaveScanner creates a new X4SaveScanner for the given file path and initializes the macro map.
 func NewX4SaveScanner(filePath string) *X4SaveScanner {
 	s := &X4SaveScanner{
 		filePath: filePath,
@@ -29,6 +31,7 @@ func NewX4SaveScanner(filePath string) *X4SaveScanner {
 	return s
 }
 
+// loadMacroMap loads the macro name mapping from a local JSON file or embedded defaults.
 func (s *X4SaveScanner) loadMacroMap() {
 	s.macroMap = make(map[string]string)
 
@@ -57,6 +60,7 @@ func (s *X4SaveScanner) loadMacroMap() {
 	}
 }
 
+// getName resolves a macro and attribute name to a human-readable name.
 func (s *X4SaveScanner) getName(macro string, attrName string) string {
 	if attrName != "" && attrName != "Unnamed" {
 		return attrName
@@ -64,13 +68,18 @@ func (s *X4SaveScanner) getName(macro string, attrName string) string {
 	if name, ok := s.macroMap[strings.ToLower(macro)]; ok {
 		return name
 	}
+	if macro != "" {
+		return macro
+	}
 	return "Unnamed"
 }
 
+// resolveHierarchy traces the component hierarchy to find sector, system, and global position.
 func (s *X4SaveScanner) resolveHierarchy(targetID string, idToInfo map[string]componentInfo) (string, string, Vector3) {
 	sectorCode := "Unknown"
 	systemName := "Unknown"
-	var globalPos Vector3
+	var sectorPos Vector3
+	foundSector := false
 
 	traceID := targetID
 	for traceID != "" {
@@ -79,18 +88,23 @@ func (s *X4SaveScanner) resolveHierarchy(targetID string, idToInfo map[string]co
 			break
 		}
 
-		if info.pos != nil {
-			globalPos.X += info.pos.X
-			globalPos.Y += info.pos.Y
-			globalPos.Z += info.pos.Z
-		}
-
 		if info.class == "sector" && sectorCode == "Unknown" {
-			if info.code != "" {
+			// Try to get friendly name from macro first
+			if name, ok := s.macroMap[strings.ToLower(info.macro)]; ok {
+				sectorCode = name
+			} else if info.code != "" {
 				sectorCode = info.code
 			} else {
 				sectorCode = info.macro
 			}
+			foundSector = true
+			continue // Don't add the sector's own position to the sector-relative sum
+		}
+
+		if !foundSector && info.pos != nil {
+			sectorPos.X += info.pos.X
+			sectorPos.Y += info.pos.Y
+			sectorPos.Z += info.pos.Z
 		}
 
 		if info.class == "cluster" {
@@ -104,11 +118,17 @@ func (s *X4SaveScanner) resolveHierarchy(targetID string, idToInfo map[string]co
 		traceID = info.parent
 	}
 
-	return sectorCode, systemName, globalPos
+	return sectorCode, systemName, sectorPos
 }
 
-// Scan performs the analysis based on the criteria provided and returns the result set.
-func (s *X4SaveScanner) Scan(shipQuery string, findKhaak, findUnowned, findVaults bool) (*AnalysisResults, error) {
+// Scan performs the analysis on the file at s.filePath based on the provided criteria.
+func (s *X4SaveScanner) Scan(shipQuery string, findKhaak, findUnowned, findVaults bool, onProgress func(float64)) (*AnalysisResults, error) {
+	fileInfo, err := os.Stat(s.filePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get file info: %w", err)
+	}
+	totalSize := fileInfo.Size()
+
 	f, err := os.Open(s.filePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open save file: %w", err)
@@ -116,8 +136,12 @@ func (s *X4SaveScanner) Scan(shipQuery string, findKhaak, findUnowned, findVault
 	defer f.Close()
 
 	var reader io.Reader = f
+	if onProgress != nil {
+		reader = NewProgressReader(f, totalSize, onProgress)
+	}
+
 	if strings.HasSuffix(s.filePath, ".gz") {
-		gz, err := gzip.NewReader(f)
+		gz, err := gzip.NewReader(reader)
 		if err != nil {
 			return nil, fmt.Errorf("failed to initialize gzip reader: %w", err)
 		}
@@ -128,13 +152,16 @@ func (s *X4SaveScanner) Scan(shipQuery string, findKhaak, findUnowned, findVault
 	return s.ScanReader(reader, shipQuery, findKhaak, findUnowned, findVaults)
 }
 
+// ScanReader performs the analysis on an io.Reader stream based on the provided criteria.
 func (s *X4SaveScanner) ScanReader(reader io.Reader, shipQuery string, findKhaak, findUnowned, findVaults bool) (*AnalysisResults, error) {
 	query := strings.ToLower(shipQuery)
 	results := NewAnalysisResults()
 	idToInfo := make(map[string]componentInfo)
 
 	decoder := xml.NewDecoder(reader)
-	parentStack := make([]string, 0, 16) // Pre-allocate small slice
+	parentStack := make([]string, 0, 16) // Stack of component IDs
+	tagStack := make([]string, 0, 32)    // Stack of XML tag names
+	pendingPos := Vector3{}
 
 	for {
 		token, err := decoder.Token()
@@ -148,6 +175,8 @@ func (s *X4SaveScanner) ScanReader(reader io.Reader, shipQuery string, findKhaak
 		switch t := token.(type) {
 		case xml.StartElement:
 			localName := t.Name.Local
+			tagStack = append(tagStack, localName)
+
 			if localName == "component" {
 				var cid, class, macro, owner, name, code, state, readStatus string
 				for _, attr := range t.Attr {
@@ -176,22 +205,26 @@ func (s *X4SaveScanner) ScanReader(reader io.Reader, shipQuery string, findKhaak
 					parentID = parentStack[len(parentStack)-1]
 				}
 
+				// For now, let's at least ensure we only store what's needed for hierarchy.
+				isShip := shipClasses[class]
+				isStation := stationClasses[class]
+				isVault := vaultClasses[class]
+				isModule := (class == "module" || class == "production" || class == "storage" || class == "dockarea" || class == "defence")
+
+				initialPos := pendingPos
 				info := componentInfo{
 					parent: parentID,
 					class:  class,
 					macro:  macro,
 					code:   code,
+					pos:    &initialPos,
 				}
+				pendingPos = Vector3{} // Reset for next component
 
 				idToInfo[cid] = info
 				parentStack = append(parentStack, cid)
 
-				// Filter trackers
-				isShip := shipClasses[class]
-				isStation := stationClasses[class]
-				isVault := vaultClasses[class]
-
-				if findKhaak && owner == "khaak" && isStation {
+				if findKhaak && owner == "khaak" && (isStation || isModule) {
 					lm := strings.ToLower(macro)
 					stype := "Installation"
 					found := false
@@ -222,7 +255,7 @@ func (s *X4SaveScanner) ScanReader(reader io.Reader, shipQuery string, findKhaak
 
 					if found {
 						results.Khaak = append(results.Khaak, ScanResult{
-							ID: cid, Type: stype, Macro: macro, IsWreck: state == "wreck",
+							ID: cid, Name: s.getName(macro, ""), Type: stype, Macro: macro, IsWreck: state == "wreck",
 						})
 					}
 				}
@@ -248,29 +281,52 @@ func (s *X4SaveScanner) ScanReader(reader io.Reader, shipQuery string, findKhaak
 
 				if findVaults && isVault {
 					results.Vaults = append(results.Vaults, ScanResult{
-						ID: cid, Name: "Data Vault", Macro: macro,
+						ID: cid, Name: s.getName(macro, "Data Vault"), Macro: macro,
 						IsDecrypted: readStatus == "1",
 					})
 				}
 
 			} else if localName == "position" {
-				if len(parentStack) > 0 {
-					cid := parentStack[len(parentStack)-1]
-					var pos Vector3
-					for _, attr := range t.Attr {
-						val, _ := strconv.ParseFloat(attr.Value, 64)
-						switch attr.Name.Local {
-						case "x":
-							pos.X = val
-						case "y":
-							pos.Y = val
-						case "z":
-							pos.Z = val
-						}
+				var pos Vector3
+				for _, attr := range t.Attr {
+					val, _ := strconv.ParseFloat(attr.Value, 64)
+					switch attr.Name.Local {
+					case "x":
+						pos.X = val
+					case "y":
+						pos.Y = val
+					case "z":
+						pos.Z = val
 					}
+				}
+
+				// Look back in tagStack to see if we are in a connection or component's offset
+				isCompPos := false
+				for i := len(tagStack) - 1; i >= 0; i-- {
+					if tagStack[i] == "component" {
+						isCompPos = true
+						break
+					}
+					if tagStack[i] == "connection" {
+						isCompPos = false
+						break
+					}
+				}
+
+				if isCompPos && len(parentStack) > 0 {
+					cid := parentStack[len(parentStack)-1]
 					info := idToInfo[cid]
-					info.pos = &pos
+					if info.pos == nil {
+						info.pos = &Vector3{}
+					}
+					info.pos.X += pos.X
+					info.pos.Y += pos.Y
+					info.pos.Z += pos.Z
 					idToInfo[cid] = info
+				} else {
+					pendingPos.X += pos.X
+					pendingPos.Y += pos.Y
+					pendingPos.Z += pos.Z
 				}
 			} else if localName == "game" || localName == "player" || localName == "save" {
 				// Capture basic save attributes
@@ -280,10 +336,17 @@ func (s *X4SaveScanner) ScanReader(reader io.Reader, shipQuery string, findKhaak
 			}
 
 		case xml.EndElement:
-			if t.Name.Local == "component" {
+			localName := t.Name.Local
+			if len(tagStack) > 0 {
+				tagStack = tagStack[:len(tagStack)-1]
+			}
+
+			if localName == "component" {
 				if len(parentStack) > 0 {
 					parentStack = parentStack[:len(parentStack)-1]
 				}
+			} else if localName == "connection" {
+				pendingPos = Vector3{} // Clear any unconsumed offset to prevent leakage
 			}
 		}
 	}
