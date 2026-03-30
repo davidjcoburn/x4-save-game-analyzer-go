@@ -26,6 +26,7 @@ func main() {
 	gameRoot := flag.String("game", "", "Path to X4 Foundations root directory (for extraction)")
 	flag.Parse()
 
+	isInteractive := false
 	if *extract {
 		if err := analyzer.ExtractGameData(*gameRoot, openFolderDialog); err != nil {
 			log.Fatalf("Error extracting game data: %v", err)
@@ -38,7 +39,6 @@ func main() {
 		return
 	}
 
-	isInteractive := false
 	if *path == "" {
 		isInteractive = true
 		p, err := openFileDialog()
@@ -51,10 +51,11 @@ func main() {
 			return
 		}
 		*path = p
+	}
 
-		if !*khaak && !*unowned && !*vaults && *ship == "" {
-			interactiveMenu(ship, khaak, unowned, vaults)
-		}
+	if !*khaak && !*unowned && !*vaults && *ship == "" {
+		isInteractive = true
+		interactiveMenu(ship, khaak, unowned, vaults)
 	}
 
 	if _, err := os.Stat(*path); os.IsNotExist(err) {
@@ -71,7 +72,7 @@ func main() {
 		fmt.Printf("\rScanning... %.0f%%", percent)
 	}
 
-	results, err := scanner.Scan(*ship, *khaak, *unowned, *vaults, onProgress)
+	results, err := scanner.Scan(*ship != "" || isInteractive, *khaak, *unowned, *vaults, onProgress)
 	if err != nil {
 		fmt.Println() // Newline after progress
 		log.Fatalf("An error occurred during analysis: %v", err)
@@ -79,11 +80,39 @@ func main() {
 	fmt.Printf("\rScanning... 100%%\n")
 	endTime := time.Now()
 
-	printResults(results, *ship, *khaak, *unowned, *vaults, endTime.Sub(startTime))
+	duration := endTime.Sub(startTime)
+	printBaseInfo(results, duration)
+
+	if *ship != "" {
+		printShipSearch(results, *ship)
+	}
+
+	if *unowned {
+		printUnowned(results)
+	}
+
+	if *vaults {
+		printVaults(results)
+	}
+
+	if *khaak {
+		printKhaak(results)
+	}
 
 	if isInteractive {
-		fmt.Print("\nPress Enter to exit...")
-		bufio.NewReader(os.Stdin).ReadString('\n')
+		for {
+			fmt.Print("\nEnter ship name or ID to search for (blank to exit): ")
+			scanner := bufio.NewScanner(os.Stdin)
+			if scanner.Scan() {
+				query := strings.TrimSpace(scanner.Text())
+				if query == "" {
+					break
+				}
+				printShipSearch(results, query)
+			} else {
+				break
+			}
+		}
 	}
 }
 
@@ -126,7 +155,7 @@ func handleBuildMap() {
 	}
 }
 
-func printResults(results *analyzer.AnalysisResults, shipQuery string, findKhaak, findUnowned, findVaults bool, duration time.Duration) {
+func printBaseInfo(results *analyzer.AnalysisResults, duration time.Duration) {
 	info := results.Info
 	fmt.Printf("\nSave Game Information (Scanned in %.2fs):\n", duration.Seconds())
 	fmt.Printf("  Player:       %s\n", info["player_name"])
@@ -140,89 +169,98 @@ func printResults(results *analyzer.AnalysisResults, shipQuery string, findKhaak
 		dt := time.Unix(ts, 0)
 		fmt.Printf("  Save Date:    %s\n", dt.Format("2006-01-02 15:04:05"))
 	}
+}
 
-	if shipQuery != "" {
-		ships := results.Ships
-		fmt.Printf("\nShip search for '%s' (%d found):\n", shipQuery, len(ships))
-		sort.Slice(ships, func(i, j int) bool {
-			return ships[i].Name < ships[j].Name
+func printShipSearch(results *analyzer.AnalysisResults, shipQuery string) {
+	query := strings.ToLower(shipQuery)
+	var matched []analyzer.ScanResult
+	for _, s := range results.Ships {
+		if strings.Contains(strings.ToLower(s.Name), query) ||
+			strings.Contains(strings.ToLower(s.Macro), query) ||
+			(s.Code != "" && strings.Contains(strings.ToLower(s.Code), query)) {
+			matched = append(matched, s)
+		}
+	}
+
+	fmt.Printf("\nShip search for '%s' (%d found):\n", shipQuery, len(matched))
+	sort.Slice(matched, func(i, j int) bool {
+		return matched[i].Name < matched[j].Name
+	})
+	for _, s := range matched {
+		wreckStr := ""
+		if s.IsWreck {
+			wreckStr = " [WRECKED]"
+		}
+		fmt.Printf("  - [%s] %s%s (%s) ID: %s\n", s.Owner, s.Name, wreckStr, s.Class, s.Code)
+		fmt.Printf("    Sector: %s | System: %s\n", s.Sector, s.System)
+		fmt.Printf("    Position: X: %s, Y: %s, Z: %s\n", analyzer.FormatCoord(s.Pos.X), analyzer.FormatCoord(s.Pos.Y), analyzer.FormatCoord(s.Pos.Z))
+	}
+}
+
+func printUnowned(results *analyzer.AnalysisResults) {
+	ships := results.Unowned
+	fmt.Printf("\nAbandoned ships (%d found):\n", len(ships))
+	sort.Slice(ships, func(i, j int) bool {
+		if ships[i].System != ships[j].System {
+			return ships[i].System < ships[j].System
+		}
+		return ships[i].Name < ships[j].Name
+	})
+	for _, s := range ships {
+		fmt.Printf("  - %s (%s) ID: %s\n", s.Name, s.Class, s.Code)
+		fmt.Printf("    Sector: %s | System: %s\n", s.Sector, s.System)
+		fmt.Printf("    Position: X: %s, Y: %s, Z: %s\n", analyzer.FormatCoord(s.Pos.X), analyzer.FormatCoord(s.Pos.Y), analyzer.FormatCoord(s.Pos.Z))
+	}
+}
+
+func printVaults(results *analyzer.AnalysisResults) {
+	v := results.Vaults
+	fmt.Printf("\nData Vaults (%d found):\n", len(v))
+	sort.Slice(v, func(i, j int) bool {
+		if v[i].System != v[j].System {
+			return v[i].System < v[j].System
+		}
+		return v[i].Sector < v[j].Sector
+	})
+	for _, val := range v {
+		statusStr := " [LOCKED]"
+		if val.IsDecrypted {
+			statusStr = " [DECRYPTED]"
+		}
+		fmt.Printf("  - %s%s | Sector: %s | System: %s\n", val.Name, statusStr, val.Sector, val.System)
+		fmt.Printf("    Position: X: %s, Y: %s, Z: %s\n", analyzer.FormatCoord(val.Pos.X), analyzer.FormatCoord(val.Pos.Y), analyzer.FormatCoord(val.Pos.Z))
+	}
+}
+
+func printKhaak(results *analyzer.AnalysisResults) {
+	targets := results.Khaak
+	fmt.Printf("\nKha'ak Intelligence Report:\n")
+	var hives, nests []analyzer.ScanResult
+	for _, t := range targets {
+		if t.Type == "Hive" {
+			hives = append(hives, t)
+		} else if t.Type == "Nest" {
+			nests = append(nests, t)
+		}
+	}
+	fmt.Printf("  Total Hives:         %d\n", len(hives))
+	fmt.Printf("  Total Nests:         %d\n", len(nests))
+
+	if len(targets) > 0 {
+		fmt.Printf("\nDetected Locations (Global Sector Coordinates):\n")
+		sort.Slice(targets, func(i, j int) bool {
+			if targets[i].Type != targets[j].Type {
+				return targets[i].Type < targets[j].Type
+			}
+			return targets[i].System < targets[j].System
 		})
-		for _, s := range ships {
+		for _, t := range targets {
 			wreckStr := ""
-			if s.IsWreck {
+			if t.IsWreck {
 				wreckStr = " [WRECKED]"
 			}
-			fmt.Printf("  - [%s] %s%s (%s) Code: %s\n", s.Owner, s.Name, wreckStr, s.Class, s.Code)
-			fmt.Printf("    Sector: %s | System: %s\n", s.Sector, s.System)
-			fmt.Printf("    Position: X: %s, Y: %s, Z: %s\n", analyzer.FormatCoord(s.Pos.X), analyzer.FormatCoord(s.Pos.Y), analyzer.FormatCoord(s.Pos.Z))
-		}
-	}
-
-	if findUnowned {
-		ships := results.Unowned
-		fmt.Printf("\nAbandoned ships (%d found):\n", len(ships))
-		sort.Slice(ships, func(i, j int) bool {
-			if ships[i].System != ships[j].System {
-				return ships[i].System < ships[j].System
-			}
-			return ships[i].Name < ships[j].Name
-		})
-		for _, s := range ships {
-			fmt.Printf("  - %s (%s) Code: %s\n", s.Name, s.Class, s.Code)
-			fmt.Printf("    Sector: %s | System: %s\n", s.Sector, s.System)
-			fmt.Printf("    Position: X: %s, Y: %s, Z: %s\n", analyzer.FormatCoord(s.Pos.X), analyzer.FormatCoord(s.Pos.Y), analyzer.FormatCoord(s.Pos.Z))
-		}
-	}
-
-	if findVaults {
-		v := results.Vaults
-		fmt.Printf("\nData Vaults (%d found):\n", len(v))
-		sort.Slice(v, func(i, j int) bool {
-			if v[i].System != v[j].System {
-				return v[i].System < v[j].System
-			}
-			return v[i].Sector < v[j].Sector
-		})
-		for _, val := range v {
-			statusStr := " [LOCKED]"
-			if val.IsDecrypted {
-				statusStr = " [DECRYPTED]"
-			}
-			fmt.Printf("  - %s%s | Sector: %s | System: %s\n", val.Name, statusStr, val.Sector, val.System)
-			fmt.Printf("    Position: X: %s, Y: %s, Z: %s\n", analyzer.FormatCoord(val.Pos.X), analyzer.FormatCoord(val.Pos.Y), analyzer.FormatCoord(val.Pos.Z))
-		}
-	}
-
-	if findKhaak {
-		targets := results.Khaak
-		fmt.Printf("\nKha'ak Intelligence Report:\n")
-		var hives, nests []analyzer.ScanResult
-		for _, t := range targets {
-			if t.Type == "Hive" {
-				hives = append(hives, t)
-			} else if t.Type == "Nest" {
-				nests = append(nests, t)
-			}
-		}
-		fmt.Printf("  Total Hives:         %d\n", len(hives))
-		fmt.Printf("  Total Nests:         %d\n", len(nests))
-
-		if len(targets) > 0 {
-			fmt.Printf("\nDetected Locations (Global Sector Coordinates):\n")
-			sort.Slice(targets, func(i, j int) bool {
-				if targets[i].Type != targets[j].Type {
-					return targets[i].Type < targets[j].Type
-				}
-				return targets[i].System < targets[j].System
-			})
-			for _, t := range targets {
-				wreckStr := ""
-				if t.IsWreck {
-					wreckStr = " [WRECKED]"
-				}
-				fmt.Printf("  - [%s] %s%s | Sector: %s | System: %s\n", t.Type, t.Name, wreckStr, t.Sector, t.System)
-				fmt.Printf("    Position: X: %s, Y: %s, Z: %s\n", analyzer.FormatCoord(t.Pos.X), analyzer.FormatCoord(t.Pos.Y), analyzer.FormatCoord(t.Pos.Z))
-			}
+			fmt.Printf("  - [%s] %s%s | Sector: %s | System: %s\n", t.Type, t.Name, wreckStr, t.Sector, t.System)
+			fmt.Printf("    Position: X: %s, Y: %s, Z: %s\n", analyzer.FormatCoord(t.Pos.X), analyzer.FormatCoord(t.Pos.Y), analyzer.FormatCoord(t.Pos.Z))
 		}
 	}
 }
@@ -234,7 +272,7 @@ func interactiveMenu(ship *string, khaak *bool, unowned *bool, vaults *bool) {
 	fmt.Println("1. Kha'ak Intelligence Report (Hives & Nests)")
 	fmt.Println("2. Unowned (Abandoned) Ships")
 	fmt.Println("3. Data Vaults (Decrypted status and locations)")
-	fmt.Println("4. Search for ship by name")
+	fmt.Println("4. Search for ship by name or ID")
 	fmt.Println("5. All of the above")
 
 	fmt.Print("\nChoice [1-5]: ")
@@ -245,7 +283,7 @@ func interactiveMenu(ship *string, khaak *bool, unowned *bool, vaults *bool) {
 		*unowned = strings.Contains(choice, "2") || strings.Contains(choice, "5")
 		*vaults = strings.Contains(choice, "3") || strings.Contains(choice, "5")
 		if strings.Contains(choice, "4") || strings.Contains(choice, "5") {
-			fmt.Print("Enter ship name to search for (or leave blank): ")
+			fmt.Print("Enter ship name or ID to search for (or leave blank): ")
 			if scanner.Scan() {
 				*ship = strings.TrimSpace(scanner.Text())
 			}

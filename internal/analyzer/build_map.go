@@ -87,7 +87,60 @@ func BuildMacroMap(gameDataDir string, onProgress func(float64)) (map[string]str
 			continue
 		}
 
-		// 2. Scan for macro mappings in other XML files
+		// 2. Process wares.xml for ship names
+		if base == "wares.xml" {
+			f, err := os.Open(path)
+			if err != nil {
+				continue
+			}
+			decoder := xml.NewDecoder(f)
+			var currentWareName string
+			for {
+				token, err := decoder.Token()
+				if err == io.EOF {
+					break
+				}
+				if err != nil {
+					break
+				}
+				switch t := token.(type) {
+				case xml.StartElement:
+					if t.Name.Local == "ware" {
+						for _, attr := range t.Attr {
+							if attr.Name.Local == "name" {
+								currentWareName = attr.Value
+							}
+						}
+					} else if t.Name.Local == "component" && currentWareName != "" {
+						var macroName string
+						for _, attr := range t.Attr {
+							if attr.Name.Local == "ref" {
+								macroName = strings.ToLower(attr.Value)
+							}
+						}
+						if macroName != "" {
+							if match := reTag.FindStringSubmatch(currentWareName); len(match) == 3 {
+								page := strings.TrimLeft(match[1], "0")
+								if page == "" && match[1] != "" {
+									page = "0"
+								}
+								mappings[macroName] = [2]string{page, match[2]}
+							} else if !strings.Contains(currentWareName, "{") {
+								mappings[macroName] = [2]string{"LITERAL", currentWareName}
+							}
+						}
+					}
+				case xml.EndElement:
+					if t.Name.Local == "ware" {
+						currentWareName = ""
+					}
+				}
+			}
+			f.Close()
+			continue
+		}
+
+		// 3. Scan for macro mappings in other XML files
 		f, err := os.Open(path)
 		if err != nil {
 			continue
@@ -124,20 +177,25 @@ func BuildMacroMap(gameDataDir string, onProgress func(float64)) (map[string]str
 					}
 					if identName != "" {
 						match := reTag.FindStringSubmatch(identName)
-						if len(match) == 3 {
-							// Find nearest ancestor with a name
-							for i := len(nameStack) - 2; i >= 0; i-- {
-								if nameStack[i] != "" {
-									mLower := strings.ToLower(nameStack[i])
-									if strings.Contains(mLower, "ship") || strings.Contains(mLower, "cluster") || strings.Contains(mLower, "sector") || strings.Contains(mLower, "station") || strings.Contains(mLower, "vault") || strings.Contains(mLower, "kha") || strings.Contains(mLower, "module") {
-										page := strings.TrimLeft(match[1], "0")
-										if page == "" && match[1] != "" {
-											page = "0"
-										}
-										mappings[mLower] = [2]string{page, match[2]}
-									}
-									break
+						// Find nearest ancestor with a name
+						var ancestorName string
+						for i := len(nameStack) - 2; i >= 0; i-- {
+							if nameStack[i] != "" {
+								ancestorName = strings.ToLower(nameStack[i])
+								break
+							}
+						}
+
+						if ancestorName != "" && (strings.Contains(ancestorName, "ship") || strings.Contains(ancestorName, "cluster") || strings.Contains(ancestorName, "sector") || strings.Contains(ancestorName, "station") || strings.Contains(ancestorName, "vault") || strings.Contains(ancestorName, "kha") || strings.Contains(ancestorName, "module")) {
+							if len(match) == 3 {
+								page := strings.TrimLeft(match[1], "0")
+								if page == "" && match[1] != "" {
+									page = "0"
 								}
+								mappings[ancestorName] = [2]string{page, match[2]}
+							} else if !strings.Contains(identName, "{") {
+								// Literal name (common in mods or special ships)
+								mappings[ancestorName] = [2]string{"LITERAL", identName}
 							}
 						}
 					}
@@ -167,9 +225,13 @@ func BuildMacroMap(gameDataDir string, onProgress func(float64)) (map[string]str
 		}
 	}
 
-	// 3. Resolve names
+	// 4. Resolve names
 	finalMap := make(map[string]string)
 	for macro, ids := range mappings {
+		if ids[0] == "LITERAL" {
+			finalMap[macro] = ids[1]
+			continue
+		}
 		if page, ok := allTrans[ids[0]]; ok {
 			if text, ok := page[ids[1]]; ok {
 				resolved := resolveText(text, allTrans, 0)
@@ -180,11 +242,12 @@ func BuildMacroMap(gameDataDir string, onProgress func(float64)) (map[string]str
 		}
 	}
 
-	// 4. Manual overrides/fallbacks for known macros with poor or missing names
+	// 5. Manual overrides/fallbacks for known macros with poor or missing names
 	overrides := map[string]string{
 		"landmarks_kha_nest_01_macro":             "Kha'ak Nest Installation",
 		"landmarks_kha_hive_01_macro":             "Kha'ak Hive Installation",
 		"landmarks_kha_weaponplatform_01_macro": "Kha'ak Weapon Platform",
+		"ship_par_l_expeditionary_01_euh_macro": "Trinity",
 	}
 	for m, name := range overrides {
 		if _, ok := finalMap[m]; !ok {
@@ -218,22 +281,76 @@ func resolveText(text string, allTrans map[string]map[string]string, depth int) 
 		return m
 	})
 
-	if strings.Contains(res, "(") && strings.Contains(res, ")") {
-		if strings.Contains(text, "{") {
-			reParen := regexp.MustCompile(`\(([^)]+)\)`)
-			m := reParen.FindStringSubmatch(res)
-			if len(m) == 2 {
-				return strings.TrimSpace(m[1])
+	// Unescape literal parentheses and brackets first so we can see the real text
+	res = strings.ReplaceAll(res, `\(`, "(")
+	res = strings.ReplaceAll(res, `\)`, ")")
+	res = strings.ReplaceAll(res, `\{`, "{")
+	res = strings.ReplaceAll(res, `\}`, "}")
+
+	// X4 translation files often use (Comment) for voice or translation hints.
+	// We want to strip these if they are redundant.
+	
+	// 1. Strip (Comment) from the very beginning if it repeats what follows.
+	if strings.HasPrefix(res, "(") {
+		count := 0
+		endIdx := -1
+		for i, c := range res {
+			if c == '(' {
+				count++
+			} else if c == ')' {
+				count--
+				if count == 0 {
+					endIdx = i
+					break
+				}
+			}
+		}
+		if endIdx != -1 && endIdx < len(res)-1 {
+			inner := res[1:endIdx]
+			remaining := strings.TrimSpace(res[endIdx+1:])
+			if remaining != "" {
+				if strings.Contains(strings.ToLower(remaining), strings.ToLower(inner)) || len(inner) > 20 {
+					res = remaining
+				}
 			}
 		}
 	}
 
-	res = reTag.ReplaceAllString(res, "")
-	reParenCleanup := regexp.MustCompile(`\([^)]+\)`)
-	res = reParenCleanup.ReplaceAllString(res, "")
+	// 2. Strip (Comment) from the very end if it repeats what preceded it or is metadata.
+	if strings.HasSuffix(res, ")") {
+		startIdx := -1
+		count := 0
+		for i := len(res) - 1; i >= 0; i-- {
+			if res[i] == ')' {
+				count++
+			} else if res[i] == '(' {
+				count--
+				if count == 0 {
+					startIdx = i
+					break
+				}
+			}
+		}
+		if startIdx != -1 && startIdx > 0 {
+			inner := res[startIdx+1 : len(res)-1]
+			preceding := strings.TrimSpace(res[:startIdx])
+			if preceding != "" {
+				lowerInner := strings.ToLower(inner)
+				if strings.Contains(strings.ToLower(preceding), lowerInner) ||
+					strings.HasPrefix(lowerInner, "voice:") ||
+					strings.HasPrefix(lowerInner, "comment:") ||
+					strings.HasPrefix(lowerInner, "speak as") ||
+					strings.HasPrefix(lowerInner, "do not translate") ||
+					len(inner) > 30 {
+					res = preceding
+				}
+			}
+		}
+	}
 
 	return strings.TrimSpace(res)
 }
+
 
 // SaveMacroMap saves the macro mapping to a JSON file.
 func SaveMacroMap(filePath string, macroMap map[string]string) error {

@@ -122,7 +122,7 @@ func (s *X4SaveScanner) resolveHierarchy(targetID string, idToInfo map[string]co
 }
 
 // Scan performs the analysis on the file at s.filePath based on the provided criteria.
-func (s *X4SaveScanner) Scan(shipQuery string, findKhaak, findUnowned, findVaults bool, onProgress func(float64)) (*AnalysisResults, error) {
+func (s *X4SaveScanner) Scan(findShips, findKhaak, findUnowned, findVault bool, onProgress func(float64)) (*AnalysisResults, error) {
 	fileInfo, err := os.Stat(s.filePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get file info: %w", err)
@@ -149,12 +149,11 @@ func (s *X4SaveScanner) Scan(shipQuery string, findKhaak, findUnowned, findVault
 		reader = gz
 	}
 
-	return s.ScanReader(reader, shipQuery, findKhaak, findUnowned, findVaults)
+	return s.ScanReader(reader, findShips, findKhaak, findUnowned, findVault)
 }
 
 // ScanReader performs the analysis on an io.Reader stream based on the provided criteria.
-func (s *X4SaveScanner) ScanReader(reader io.Reader, shipQuery string, findKhaak, findUnowned, findVaults bool) (*AnalysisResults, error) {
-	query := strings.ToLower(shipQuery)
+func (s *X4SaveScanner) ScanReader(reader io.Reader, findShips, findKhaak, findUnowned, findVault bool) (*AnalysisResults, error) {
 	results := NewAnalysisResults()
 	idToInfo := make(map[string]componentInfo)
 
@@ -260,16 +259,11 @@ func (s *X4SaveScanner) ScanReader(reader io.Reader, shipQuery string, findKhaak
 					}
 				}
 
-				if query != "" && isShip {
-					displayName := s.getName(macro, name)
-					if strings.Contains(strings.ToLower(displayName), query) ||
-						strings.Contains(strings.ToLower(macro), query) ||
-						(code != "" && strings.Contains(strings.ToLower(code), query)) {
-						results.Ships = append(results.Ships, ScanResult{
-							ID: cid, Name: displayName, Class: class, Macro: macro,
-							Owner: owner, Code: code, IsWreck: state == "wreck",
-						})
-					}
+				if findShips && isShip {
+					results.Ships = append(results.Ships, ScanResult{
+						ID: cid, Name: s.getName(macro, name), Class: class, Macro: macro,
+						Owner: owner, Code: code, IsWreck: state == "wreck",
+					})
 				}
 
 				if findUnowned && isShip && owner == "ownerless" && state != "wreck" {
@@ -279,7 +273,7 @@ func (s *X4SaveScanner) ScanReader(reader io.Reader, shipQuery string, findKhaak
 					})
 				}
 
-				if findVaults && isVault {
+				if findVault && isVault {
 					results.Vaults = append(results.Vaults, ScanResult{
 						ID: cid, Name: s.getName(macro, "Data Vault"), Macro: macro,
 						IsDecrypted: readStatus == "1",
