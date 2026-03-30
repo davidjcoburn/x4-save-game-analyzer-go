@@ -52,4 +52,9 @@ func TestBuildMacroMap(t *testing.T) {
 	if got := macroMap["test_ship_macro"]; got != "Test Ship Name" {
 		t.Errorf("Expected macro mapping 'Test Ship Name', got %q", got)
 	}
+
+	// Verify manual override
+	if got := macroMap["landmarks_kha_nest_01_macro"]; got != "Kha'ak Installation" {
+		t.Errorf("Expected manual override 'Kha'ak Installation', got %q", got)
+	}
 }

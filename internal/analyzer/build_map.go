@@ -180,6 +180,18 @@ func BuildMacroMap(gameDataDir string, onProgress func(float64)) (map[string]str
 		}
 	}
 
+	// 4. Manual overrides/fallbacks for known macros with poor or missing names
+	overrides := map[string]string{
+		"landmarks_kha_nest_01_macro":             "Kha'ak Installation",
+		"landmarks_kha_hive_01_macro":             "Kha'ak Installation",
+		"landmarks_kha_weaponplatform_01_macro": "Kha'ak Weapon Platform",
+	}
+	for m, name := range overrides {
+		if _, ok := finalMap[m]; !ok {
+			finalMap[m] = name
+		}
+	}
+
 	return finalMap, nil
 }
 
