@@ -91,8 +91,9 @@ func TestExtendedScan(t *testing.T) {
 	scanner := NewX4SaveScanner("dummy.xml")
 	// Mock macroMap
 	scanner.macroMap = map[string]string{
-		"cluster_name": "Test System",
-		"vault_macro":  "Data Vault",
+		"cluster_name":            "Test System",
+		"vault_macro":             "Data Vault",
+		"station_khk_hive_macro": "Kha'ak Hive",
 	}
 
 	reader := strings.NewReader(sampleXML)
@@ -104,8 +105,13 @@ func TestExtendedScan(t *testing.T) {
 	// Verify Kha'ak
 	if len(results.Khaak) != 1 {
 		t.Errorf("Expected 1 Kha'ak target, got %d", len(results.Khaak))
-	} else if results.Khaak[0].Type != "Hive" {
-		t.Errorf("Expected Kha'ak type Hive, got %s", results.Khaak[0].Type)
+	} else {
+		if results.Khaak[0].Type != "Hive" {
+			t.Errorf("Expected Kha'ak type Hive, got %s", results.Khaak[0].Type)
+		}
+		if results.Khaak[0].Name != "Kha'ak Hive" {
+			t.Errorf("Expected Kha'ak name 'Kha'ak Hive', got %q", results.Khaak[0].Name)
+		}
 	}
 
 	// Verify Unowned
@@ -197,4 +203,41 @@ func TestConnectionOffsets(t *testing.T) {
 	
 	// Verify sector-relative: Sector itself should be "Unknown" or its code,
 	// but the position should NOT include any sector offset if it had one.
+}
+
+// TestConnectionOffsetLeak verifies that offsets from empty connections do not leak into sibling components.
+func TestConnectionOffsetLeak(t *testing.T) {
+	sampleXML := `<?xml version="1.0" encoding="UTF-8"?>
+<save>
+    <universe>
+        <component id="sec" class="sector">
+            <connections>
+                <connection name="empty_con">
+                    <offset><position x="10000" y="0" z="0"/></offset>
+                </connection>
+                <connection name="ship_con">
+                    <offset><position x="2000" y="0" z="0"/></offset>
+                    <component id="ship1" class="ship_l" macro="ship_macro" owner="player"/>
+                </connection>
+            </connections>
+        </component>
+    </universe>
+</save>
+`
+	scanner := NewX4SaveScanner("dummy.xml")
+	reader := strings.NewReader(sampleXML)
+	results, err := scanner.ScanReader(reader, "ship", false, false, false)
+	if err != nil {
+		t.Fatalf("ScanReader failed: %v", err)
+	}
+
+	if len(results.Ships) != 1 {
+		t.Fatalf("Expected 1 ship, got %d", len(results.Ships))
+	}
+
+	// Without the fix, the ship would be at 12000 (10000 leak + 2000 real).
+	// With the fix, it should be at 2000.
+	if results.Ships[0].Pos.X != 2000 {
+		t.Errorf("Expected X position 2000, got %v (potential offset leak!)", results.Ships[0].Pos.X)
+	}
 }

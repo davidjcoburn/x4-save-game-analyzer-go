@@ -203,6 +203,7 @@ func (s *X4SaveScanner) ScanReader(reader io.Reader, shipQuery string, findKhaak
 				isShip := shipClasses[class]
 				isStation := stationClasses[class]
 				isVault := vaultClasses[class]
+				isModule := (class == "module" || class == "production" || class == "storage" || class == "dockarea" || class == "defence")
 
 				initialPos := pendingPos
 				info := componentInfo{
@@ -217,7 +218,7 @@ func (s *X4SaveScanner) ScanReader(reader io.Reader, shipQuery string, findKhaak
 				idToInfo[cid] = info
 				parentStack = append(parentStack, cid)
 
-				if findKhaak && owner == "khaak" && isStation {
+				if findKhaak && owner == "khaak" && (isStation || isModule) {
 					lm := strings.ToLower(macro)
 					stype := "Installation"
 					found := false
@@ -248,7 +249,7 @@ func (s *X4SaveScanner) ScanReader(reader io.Reader, shipQuery string, findKhaak
 
 					if found {
 						results.Khaak = append(results.Khaak, ScanResult{
-							ID: cid, Type: stype, Macro: macro, IsWreck: state == "wreck",
+							ID: cid, Name: s.getName(macro, ""), Type: stype, Macro: macro, IsWreck: state == "wreck",
 						})
 					}
 				}
@@ -338,6 +339,8 @@ func (s *X4SaveScanner) ScanReader(reader io.Reader, shipQuery string, findKhaak
 				if len(parentStack) > 0 {
 					parentStack = parentStack[:len(parentStack)-1]
 				}
+			} else if localName == "connection" {
+				pendingPos = Vector3{} // Clear any unconsumed offset to prevent leakage
 			}
 		}
 	}

@@ -129,7 +129,7 @@ func BuildMacroMap(gameDataDir string, onProgress func(float64)) (map[string]str
 							for i := len(nameStack) - 2; i >= 0; i-- {
 								if nameStack[i] != "" {
 									mLower := strings.ToLower(nameStack[i])
-									if strings.Contains(mLower, "ship") || strings.Contains(mLower, "cluster") || strings.Contains(mLower, "sector") || strings.Contains(mLower, "station") || strings.Contains(mLower, "vault") {
+									if strings.Contains(mLower, "ship") || strings.Contains(mLower, "cluster") || strings.Contains(mLower, "sector") || strings.Contains(mLower, "station") || strings.Contains(mLower, "vault") || strings.Contains(mLower, "khaak") {
 										page := strings.TrimLeft(match[1], "0")
 										if page == "" && match[1] != "" {
 											page = "0"

@@ -220,7 +220,7 @@ func printResults(results *analyzer.AnalysisResults, shipQuery string, findKhaak
 				if t.IsWreck {
 					wreckStr = " [WRECKED]"
 				}
-				fmt.Printf("  - [%s] %s%s | Sector: %s | System: %s\n", t.Type, t.Macro, wreckStr, t.Sector, t.System)
+				fmt.Printf("  - [%s] %s%s | Sector: %s | System: %s\n", t.Type, t.Name, wreckStr, t.Sector, t.System)
 				fmt.Printf("    Position: X: %s, Y: %s, Z: %s\n", analyzer.FormatCoord(t.Pos.X), analyzer.FormatCoord(t.Pos.Y), analyzer.FormatCoord(t.Pos.Z))
 			}
 		}
