@@ -68,6 +68,9 @@ func (s *X4SaveScanner) getName(macro string, attrName string) string {
 	if name, ok := s.macroMap[strings.ToLower(macro)]; ok {
 		return name
 	}
+	if macro != "" {
+		return macro
+	}
 	return "Unnamed"
 }
 
@@ -275,7 +278,7 @@ func (s *X4SaveScanner) ScanReader(reader io.Reader, shipQuery string, findKhaak
 
 				if findVaults && isVault {
 					results.Vaults = append(results.Vaults, ScanResult{
-						ID: cid, Name: "Data Vault", Macro: macro,
+						ID: cid, Name: s.getName(macro, "Data Vault"), Macro: macro,
 						IsDecrypted: readStatus == "1",
 					})
 				}
