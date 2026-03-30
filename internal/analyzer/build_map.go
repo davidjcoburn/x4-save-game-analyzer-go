@@ -1,3 +1,4 @@
+// Package analyzer provides tools for analyzing X4: Foundations save games.
 package analyzer
 
 import (
@@ -11,6 +12,7 @@ import (
 	"strings"
 )
 
+// tPage represents a page of translations in an X4 translation file.
 type tPage struct {
 	ID string `xml:"id,attr"`
 	T  []struct {
@@ -19,11 +21,13 @@ type tPage struct {
 	} `xml:"t"`
 }
 
+// tFile represents an X4 translation file.
 type tFile struct {
 	Pages []tPage `xml:"page"`
 }
 
-func BuildMacroMap(gameDataDir string) (map[string]string, error) {
+// BuildMacroMap scans the game data directory to build a mapping from macro names to human-readable names.
+func BuildMacroMap(gameDataDir string, onProgress func(float64)) (map[string]string, error) {
 	fmt.Printf("Building macro map from: %s\n", gameDataDir)
 
 	allTrans := make(map[string]map[string]string)
@@ -31,12 +35,38 @@ func BuildMacroMap(gameDataDir string) (map[string]string, error) {
 
 	reTag := regexp.MustCompile(`\{(\d+),(\d+)\}`)
 
-	// 1. Load translations
+	// Count files for progress
+	var totalFiles int64
+	filepath.Walk(gameDataDir, func(path string, info os.FileInfo, err error) error {
+		if err == nil && !info.IsDir() && strings.HasSuffix(strings.ToLower(path), ".xml") {
+			totalFiles++
+		}
+		return nil
+	})
+
+	var processedFiles int64
+	var lastSent float64
+
+	// Single pass walk
 	filepath.Walk(gameDataDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
 			return nil
 		}
 		base := strings.ToLower(filepath.Base(path))
+
+		isXML := strings.HasSuffix(base, ".xml")
+		if isXML {
+			processedFiles++
+			if onProgress != nil && totalFiles > 0 {
+				percent := float64(processedFiles) / float64(totalFiles) * 100
+				if percent-lastSent >= 1.0 {
+					onProgress(percent)
+					lastSent = percent
+				}
+			}
+		}
+
+		// 1. Process translations
 		if base == "0001-l044.xml" || base == "0001.xml" {
 			data, err := os.ReadFile(path)
 			if err == nil {
@@ -56,79 +86,78 @@ func BuildMacroMap(gameDataDir string) (map[string]string, error) {
 					}
 				}
 			}
-		}
-		return nil
-	})
-
-	// 2. Scan for macro mappings
-	filepath.Walk(gameDataDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() || !strings.HasSuffix(path, ".xml") {
-			return nil
+			return nil // We don't need to scan translation files for macro mappings
 		}
 
-		f, err := os.Open(path)
-		if err != nil {
-			return nil
-		}
-		defer f.Close()
-
-		decoder := xml.NewDecoder(f)
-		var nameStack []string
-
-		for {
-			token, err := decoder.Token()
-			if err == io.EOF {
-				break
-			}
+		// 2. Scan for macro mappings in other XML files
+		if isXML {
+			f, err := os.Open(path)
 			if err != nil {
-				break
+				return nil
 			}
+			defer f.Close()
 
-			switch t := token.(type) {
-			case xml.StartElement:
-				name := ""
-				for _, attr := range t.Attr {
-					if attr.Name.Local == "name" || attr.Name.Local == "macro" {
-						name = attr.Value
-					}
+			decoder := xml.NewDecoder(f)
+			var nameStack []string
+
+			for {
+				token, err := decoder.Token()
+				if err == io.EOF {
+					break
 				}
-				nameStack = append(nameStack, name)
+				if err != nil {
+					break
+				}
 
-				if t.Name.Local == "identification" {
-					var identName string
+				switch t := token.(type) {
+				case xml.StartElement:
+					name := ""
 					for _, attr := range t.Attr {
-						if attr.Name.Local == "name" {
-							identName = attr.Value
+						if attr.Name.Local == "name" || attr.Name.Local == "macro" {
+							name = attr.Value
 						}
 					}
-					if identName != "" {
-						match := reTag.FindStringSubmatch(identName)
-						if len(match) == 3 {
-							// Find nearest ancestor with a name
-							for i := len(nameStack) - 2; i >= 0; i-- {
-								if nameStack[i] != "" {
-									mLower := strings.ToLower(nameStack[i])
-									if strings.Contains(mLower, "ship") || strings.Contains(mLower, "cluster") || strings.Contains(mLower, "sector") || strings.Contains(mLower, "station") || strings.Contains(mLower, "vault") {
-										page := strings.TrimLeft(match[1], "0")
-										if page == "" && match[1] != "" {
-											page = "0"
+					nameStack = append(nameStack, name)
+
+					if t.Name.Local == "identification" {
+						var identName string
+						for _, attr := range t.Attr {
+							if attr.Name.Local == "name" {
+								identName = attr.Value
+							}
+						}
+						if identName != "" {
+							match := reTag.FindStringSubmatch(identName)
+							if len(match) == 3 {
+								// Find nearest ancestor with a name
+								for i := len(nameStack) - 2; i >= 0; i-- {
+									if nameStack[i] != "" {
+										mLower := strings.ToLower(nameStack[i])
+										if strings.Contains(mLower, "ship") || strings.Contains(mLower, "cluster") || strings.Contains(mLower, "sector") || strings.Contains(mLower, "station") || strings.Contains(mLower, "vault") {
+											page := strings.TrimLeft(match[1], "0")
+											if page == "" && match[1] != "" {
+												page = "0"
+											}
+											mappings[mLower] = [2]string{page, match[2]}
 										}
-										mappings[mLower] = [2]string{page, match[2]}
+										break
 									}
-									break
 								}
 							}
 						}
 					}
-				}
-			case xml.EndElement:
-				if len(nameStack) > 0 {
-					nameStack = nameStack[:len(nameStack)-1]
+				case xml.EndElement:
+					if len(nameStack) > 0 {
+						nameStack = nameStack[:len(nameStack)-1]
+					}
 				}
 			}
 		}
 		return nil
 	})
+	if onProgress != nil {
+		onProgress(100.0)
+	}
 
 	// Heuristic for base game clusters if still missing
 	for i := 1; i < 100; i++ {
@@ -158,6 +187,7 @@ func BuildMacroMap(gameDataDir string) (map[string]string, error) {
 	return finalMap, nil
 }
 
+// resolveText recursively resolves X4 translation tags like {page,id} in strings.
 func resolveText(text string, allTrans map[string]map[string]string, depth int) string {
 	if depth > 10 {
 		return text
@@ -197,6 +227,7 @@ func resolveText(text string, allTrans map[string]map[string]string, depth int) 
 	return strings.TrimSpace(res)
 }
 
+// SaveMacroMap saves the macro mapping to a JSON file.
 func SaveMacroMap(filePath string, macroMap map[string]string) error {
 	data, err := json.MarshalIndent(macroMap, "", "  ")
 	if err != nil {

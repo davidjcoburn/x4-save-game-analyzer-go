@@ -1,8 +1,8 @@
 # Define base paths
 $gameRoot = "E:\SteamLibrary\steamapps\common\X4 Foundations"
 $extensionsDir = Join-Path $gameRoot "extensions"
-$outputBase = "C:\Users\djcob\source\x4-save-game-analyzer\game-data"
-$catTool = Join-Path $gameRoot "XRCatTool.exe"
+$outputBase = ".\game-data"
+$catTool = ".\XRCatTool.exe"
 
 # Ensure the cat tool exists
 if (-not (Test-Path $catTool)) {
@@ -10,7 +10,18 @@ if (-not (Test-Path $catTool)) {
     return
 }
 
-# Iterate through each folder in the extensions directory
+# 1. Process main game .cat files (01.cat, 02.cat, etc.)
+Write-Host "Processing main game files..."
+$mainCatFiles = Get-ChildItem -Path $gameRoot -Filter "*.cat" | ForEach-Object { $_.FullName }
+if ($mainCatFiles.Count -gt 0) {
+    $mainOutputPath = Join-Path $outputBase "main"
+    if (-not (Test-Path $mainOutputPath)) {
+        New-Item -ItemType Directory -Path $mainOutputPath -Force | Out-Null
+    }
+    & $catTool -in $mainCatFiles -out $mainOutputPath -include "xml"
+}
+
+# 2. Iterate through each folder in the extensions directory
 Get-ChildItem -Path $extensionsDir -Directory | ForEach-Object {
     $extFolder = $_.Name
     $extPath = $_.FullName

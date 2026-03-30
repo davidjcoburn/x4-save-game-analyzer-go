@@ -1,3 +1,4 @@
+// Package analyzer provides tools for analyzing X4: Foundations save games.
 package analyzer
 
 import (
@@ -15,12 +16,13 @@ import (
 //go:embed macro_map.json
 var defaultMacroMap []byte
 
-// X4SaveScanner processes X4 save game XML streams.
+// X4SaveScanner processes X4 save game XML streams to extract specific information.
 type X4SaveScanner struct {
 	filePath string
 	macroMap map[string]string
 }
 
+// NewX4SaveScanner creates a new X4SaveScanner for the given file path and initializes the macro map.
 func NewX4SaveScanner(filePath string) *X4SaveScanner {
 	s := &X4SaveScanner{
 		filePath: filePath,
@@ -29,6 +31,7 @@ func NewX4SaveScanner(filePath string) *X4SaveScanner {
 	return s
 }
 
+// loadMacroMap loads the macro name mapping from a local JSON file or embedded defaults.
 func (s *X4SaveScanner) loadMacroMap() {
 	s.macroMap = make(map[string]string)
 
@@ -57,6 +60,7 @@ func (s *X4SaveScanner) loadMacroMap() {
 	}
 }
 
+// getName resolves a macro and attribute name to a human-readable name.
 func (s *X4SaveScanner) getName(macro string, attrName string) string {
 	if attrName != "" && attrName != "Unnamed" {
 		return attrName
@@ -67,6 +71,7 @@ func (s *X4SaveScanner) getName(macro string, attrName string) string {
 	return "Unnamed"
 }
 
+// resolveHierarchy traces the component hierarchy to find sector, system, and global position.
 func (s *X4SaveScanner) resolveHierarchy(targetID string, idToInfo map[string]componentInfo) (string, string, Vector3) {
 	sectorCode := "Unknown"
 	systemName := "Unknown"
@@ -107,8 +112,14 @@ func (s *X4SaveScanner) resolveHierarchy(targetID string, idToInfo map[string]co
 	return sectorCode, systemName, globalPos
 }
 
-// Scan performs the analysis based on the criteria provided and returns the result set.
-func (s *X4SaveScanner) Scan(shipQuery string, findKhaak, findUnowned, findVaults bool) (*AnalysisResults, error) {
+// Scan performs the analysis on the file at s.filePath based on the provided criteria.
+func (s *X4SaveScanner) Scan(shipQuery string, findKhaak, findUnowned, findVaults bool, onProgress func(float64)) (*AnalysisResults, error) {
+	fileInfo, err := os.Stat(s.filePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get file info: %w", err)
+	}
+	totalSize := fileInfo.Size()
+
 	f, err := os.Open(s.filePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open save file: %w", err)
@@ -116,8 +127,12 @@ func (s *X4SaveScanner) Scan(shipQuery string, findKhaak, findUnowned, findVault
 	defer f.Close()
 
 	var reader io.Reader = f
+	if onProgress != nil {
+		reader = NewProgressReader(f, totalSize, onProgress)
+	}
+
 	if strings.HasSuffix(s.filePath, ".gz") {
-		gz, err := gzip.NewReader(f)
+		gz, err := gzip.NewReader(reader)
 		if err != nil {
 			return nil, fmt.Errorf("failed to initialize gzip reader: %w", err)
 		}
@@ -128,6 +143,7 @@ func (s *X4SaveScanner) Scan(shipQuery string, findKhaak, findUnowned, findVault
 	return s.ScanReader(reader, shipQuery, findKhaak, findUnowned, findVaults)
 }
 
+// ScanReader performs the analysis on an io.Reader stream based on the provided criteria.
 func (s *X4SaveScanner) ScanReader(reader io.Reader, shipQuery string, findKhaak, findUnowned, findVaults bool) (*AnalysisResults, error) {
 	query := strings.ToLower(shipQuery)
 	results := NewAnalysisResults()
@@ -176,6 +192,16 @@ func (s *X4SaveScanner) ScanReader(reader io.Reader, shipQuery string, findKhaak
 					parentID = parentStack[len(parentStack)-1]
 				}
 
+				// We only MUST store info if it's a cluster, sector, or if it has a position
+				// But since we don't know if a component has a position until we see the <position> tag
+				// (which is a child), we store it tentatively.
+				// To truly optimize, we'd only store if class is ship/station/cluster/sector
+				// or if it's a parent of one.
+				// For now, let's at least ensure we only store what's needed for hierarchy.
+				isShip := shipClasses[class]
+				isStation := stationClasses[class]
+				isVault := vaultClasses[class]
+
 				info := componentInfo{
 					parent: parentID,
 					class:  class,
@@ -185,11 +211,6 @@ func (s *X4SaveScanner) ScanReader(reader io.Reader, shipQuery string, findKhaak
 
 				idToInfo[cid] = info
 				parentStack = append(parentStack, cid)
-
-				// Filter trackers
-				isShip := shipClasses[class]
-				isStation := stationClasses[class]
-				isVault := vaultClasses[class]
 
 				if findKhaak && owner == "khaak" && isStation {
 					lm := strings.ToLower(macro)

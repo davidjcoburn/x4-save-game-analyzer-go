@@ -1,3 +1,4 @@
+// Package main is the entry point for the X4 Save Game Analyzer.
 package main
 
 import (
@@ -13,6 +14,7 @@ import (
 	"x4-save-game-analyzer-go/internal/analyzer"
 )
 
+// main parses flags and executes the save game analysis.
 func main() {
 	path := flag.String("path", "", "Path to save file")
 	ship := flag.String("ship", "", "Search for a ship by name")
@@ -20,23 +22,22 @@ func main() {
 	unowned := flag.Bool("unowned", false, "Search for unowned/abandoned ships")
 	vaults := flag.Bool("vaults", false, "List all Data Vaults")
 	buildMap := flag.Bool("build-map", false, "Rebuild macro_map.json from game-data")
+	extract := flag.Bool("extract", false, "Extract XML game data from .cat files using XRCatTool.exe")
+	gameRoot := flag.String("game", "", "Path to X4 Foundations root directory (for extraction)")
 	flag.Parse()
 
-	if *buildMap {
-		macroMap, err := analyzer.BuildMacroMap("game-data")
-		if err != nil {
-			log.Fatalf("Error building macro map: %v", err)
+	if *extract {
+		if err := analyzer.ExtractGameData(*gameRoot, openFolderDialog); err != nil {
+			log.Fatalf("Error extracting game data: %v", err)
 		}
-		// Save to the source location so it's included in next build
-		if err := analyzer.SaveMacroMap("internal/analyzer/macro_map.json", macroMap); err != nil {
-			log.Fatalf("Error saving macro map: %v", err)
-		}
-		fmt.Printf("Successfully rebuilt internal/analyzer/macro_map.json with %d entries.\n", len(macroMap))
-		fmt.Println("Rebuild the executable to embed the new map.")
 		return
 	}
 
-	// If no path is supplied, try to open a file dialog
+	if *buildMap {
+		handleBuildMap()
+		return
+	}
+
 	isInteractive := false
 	if *path == "" {
 		isInteractive = true
@@ -51,7 +52,6 @@ func main() {
 		}
 		*path = p
 
-		// If no other flags were set, enter interactive criteria selection
 		if !*khaak && !*unowned && !*vaults && *ship == "" {
 			interactiveMenu(ship, khaak, unowned, vaults)
 		}
@@ -66,14 +66,69 @@ func main() {
 
 	startTime := time.Now()
 	scanner := analyzer.NewX4SaveScanner(*path)
-	results, err := scanner.Scan(*ship, *khaak, *unowned, *vaults)
+	
+	onProgress := func(percent float64) {
+		fmt.Printf("\rScanning... %.0f%%", percent)
+	}
+
+	results, err := scanner.Scan(*ship, *khaak, *unowned, *vaults, onProgress)
 	if err != nil {
+		fmt.Println() // Newline after progress
 		log.Fatalf("An error occurred during analysis: %v", err)
 	}
+	fmt.Printf("\rScanning... 100%%\n")
 	endTime := time.Now()
 
+	printResults(results, *ship, *khaak, *unowned, *vaults, endTime.Sub(startTime))
+
+	if isInteractive {
+		fmt.Print("\nPress Enter to exit...")
+		bufio.NewReader(os.Stdin).ReadString('\n')
+	}
+}
+
+func handleBuildMap() {
+	if _, err := os.Stat("game-data"); os.IsNotExist(err) {
+		fmt.Println("Error: 'game-data' directory not found.")
+		fmt.Println("You must extract the XML game data before building the map.")
+		fmt.Println("Run the analyzer with the extract flag first:")
+		fmt.Println("  x4-analyzer -extract")
+		return
+	}
+
+	onProgress := func(percent float64) {
+		fmt.Printf("\rBuilding map... %.0f%%", percent)
+	}
+
+	macroMap, err := analyzer.BuildMacroMap("game-data", onProgress)
+	if err != nil {
+		fmt.Println() // Newline after progress
+		log.Fatalf("Error building macro map: %v", err)
+	}
+	fmt.Println() // Newline after progress
+
+	// Strategy: 
+	// 1. Try to save to source location (for developers)
+	// 2. Fallback to current directory (for users)
+	savePath := "internal/analyzer/macro_map.json"
+	isSourceLocation := true
+	if _, err := os.Stat("internal/analyzer"); os.IsNotExist(err) {
+		savePath = "macro_map.json"
+		isSourceLocation = false
+	}
+
+	if err := analyzer.SaveMacroMap(savePath, macroMap); err != nil {
+		log.Fatalf("Error saving macro map: %v", err)
+	}
+	fmt.Printf("Successfully rebuilt %s with %d entries.\n", savePath, len(macroMap))
+	if isSourceLocation {
+		fmt.Println("Rebuild the executable to embed the new map.")
+	}
+}
+
+func printResults(results *analyzer.AnalysisResults, shipQuery string, findKhaak, findUnowned, findVaults bool, duration time.Duration) {
 	info := results.Info
-	fmt.Printf("\nSave Game Information (Scanned in %.2fs):\n", endTime.Sub(startTime).Seconds())
+	fmt.Printf("\nSave Game Information (Scanned in %.2fs):\n", duration.Seconds())
 	fmt.Printf("  Player:       %s\n", info["player_name"])
 	fmt.Printf("  Money:        %s\n", analyzer.FormatCredits(info["player_money"]))
 	fmt.Printf("  Game Time:    %s\n", analyzer.FormatGameTime(info["game_time"]))
@@ -86,9 +141,9 @@ func main() {
 		fmt.Printf("  Save Date:    %s\n", dt.Format("2006-01-02 15:04:05"))
 	}
 
-	if *ship != "" {
+	if shipQuery != "" {
 		ships := results.Ships
-		fmt.Printf("\nShip search for '%s' (%d found):\n", *ship, len(ships))
+		fmt.Printf("\nShip search for '%s' (%d found):\n", shipQuery, len(ships))
 		sort.Slice(ships, func(i, j int) bool {
 			return ships[i].Name < ships[j].Name
 		})
@@ -103,7 +158,7 @@ func main() {
 		}
 	}
 
-	if *unowned {
+	if findUnowned {
 		ships := results.Unowned
 		fmt.Printf("\nAbandoned ships (%d found):\n", len(ships))
 		sort.Slice(ships, func(i, j int) bool {
@@ -119,7 +174,7 @@ func main() {
 		}
 	}
 
-	if *vaults {
+	if findVaults {
 		v := results.Vaults
 		fmt.Printf("\nData Vaults (%d found):\n", len(v))
 		sort.Slice(v, func(i, j int) bool {
@@ -138,7 +193,7 @@ func main() {
 		}
 	}
 
-	if *khaak {
+	if findKhaak {
 		targets := results.Khaak
 		fmt.Printf("\nKha'ak Intelligence Report:\n")
 		var hives, nests []analyzer.ScanResult
@@ -170,13 +225,9 @@ func main() {
 			}
 		}
 	}
-
-	if isInteractive {
-		fmt.Print("\nPress Enter to exit...")
-		bufio.NewReader(os.Stdin).ReadString('\n')
-	}
 }
 
+// interactiveMenu presents a CLI menu for selecting analysis criteria when no flags are provided.
 func interactiveMenu(ship *string, khaak *bool, unowned *bool, vaults *bool) {
 	fmt.Println("\n--- X4 Save Game Analyzer (Interactive Mode) ---")
 	fmt.Println("Select search criteria (comma-separated numbers):")
