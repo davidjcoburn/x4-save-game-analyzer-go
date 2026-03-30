@@ -35,36 +35,34 @@ func BuildMacroMap(gameDataDir string, onProgress func(float64)) (map[string]str
 
 	reTag := regexp.MustCompile(`\{(\d+),(\d+)\}`)
 
-	// Count files for progress
-	var totalFiles int64
-	filepath.Walk(gameDataDir, func(path string, info os.FileInfo, err error) error {
-		if err == nil && !info.IsDir() && strings.HasSuffix(strings.ToLower(path), ".xml") {
-			totalFiles++
+	// 1. Collect all XML files in a single pass
+	type xmlFile struct {
+		path string
+		base string
+	}
+	var files []xmlFile
+	filepath.WalkDir(gameDataDir, func(path string, d os.DirEntry, err error) error {
+		if err == nil && !d.IsDir() && strings.HasSuffix(strings.ToLower(path), ".xml") {
+			files = append(files, xmlFile{path: path, base: strings.ToLower(filepath.Base(path))})
 		}
 		return nil
 	})
 
-	var processedFiles int64
+	totalFiles := int64(len(files))
 	var lastSent float64
 
-	// Single pass walk
-	filepath.Walk(gameDataDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
-			return nil
-		}
-		base := strings.ToLower(filepath.Base(path))
-
-		isXML := strings.HasSuffix(base, ".xml")
-		if isXML {
-			processedFiles++
-			if onProgress != nil && totalFiles > 0 {
-				percent := float64(processedFiles) / float64(totalFiles) * 100
-				if percent-lastSent >= 1.0 {
-					onProgress(percent)
-					lastSent = percent
-				}
+	// 2. Process collected files
+	for i, fInfo := range files {
+		if onProgress != nil && totalFiles > 0 {
+			percent := float64(i+1) / float64(totalFiles) * 100
+			if percent-lastSent >= 1.0 || i == len(files)-1 {
+				onProgress(percent)
+				lastSent = percent
 			}
 		}
+
+		path := fInfo.path
+		base := fInfo.base
 
 		// 1. Process translations
 		if base == "0001-l044.xml" || base == "0001.xml" {
@@ -86,75 +84,73 @@ func BuildMacroMap(gameDataDir string, onProgress func(float64)) (map[string]str
 					}
 				}
 			}
-			return nil // We don't need to scan translation files for macro mappings
+			continue
 		}
 
 		// 2. Scan for macro mappings in other XML files
-		if isXML {
-			f, err := os.Open(path)
-			if err != nil {
-				return nil
+		f, err := os.Open(path)
+		if err != nil {
+			continue
+		}
+
+		decoder := xml.NewDecoder(f)
+		var nameStack []string
+
+		for {
+			token, err := decoder.Token()
+			if err == io.EOF {
+				break
 			}
-			defer f.Close()
+			if err != nil {
+				break
+			}
 
-			decoder := xml.NewDecoder(f)
-			var nameStack []string
-
-			for {
-				token, err := decoder.Token()
-				if err == io.EOF {
-					break
+			switch t := token.(type) {
+			case xml.StartElement:
+				name := ""
+				for _, attr := range t.Attr {
+					if attr.Name.Local == "name" || attr.Name.Local == "macro" {
+						name = attr.Value
+					}
 				}
-				if err != nil {
-					break
-				}
+				nameStack = append(nameStack, name)
 
-				switch t := token.(type) {
-				case xml.StartElement:
-					name := ""
+				if t.Name.Local == "identification" {
+					var identName string
 					for _, attr := range t.Attr {
-						if attr.Name.Local == "name" || attr.Name.Local == "macro" {
-							name = attr.Value
+						if attr.Name.Local == "name" {
+							identName = attr.Value
 						}
 					}
-					nameStack = append(nameStack, name)
-
-					if t.Name.Local == "identification" {
-						var identName string
-						for _, attr := range t.Attr {
-							if attr.Name.Local == "name" {
-								identName = attr.Value
-							}
-						}
-						if identName != "" {
-							match := reTag.FindStringSubmatch(identName)
-							if len(match) == 3 {
-								// Find nearest ancestor with a name
-								for i := len(nameStack) - 2; i >= 0; i-- {
-									if nameStack[i] != "" {
-										mLower := strings.ToLower(nameStack[i])
-										if strings.Contains(mLower, "ship") || strings.Contains(mLower, "cluster") || strings.Contains(mLower, "sector") || strings.Contains(mLower, "station") || strings.Contains(mLower, "vault") {
-											page := strings.TrimLeft(match[1], "0")
-											if page == "" && match[1] != "" {
-												page = "0"
-											}
-											mappings[mLower] = [2]string{page, match[2]}
+					if identName != "" {
+						match := reTag.FindStringSubmatch(identName)
+						if len(match) == 3 {
+							// Find nearest ancestor with a name
+							for i := len(nameStack) - 2; i >= 0; i-- {
+								if nameStack[i] != "" {
+									mLower := strings.ToLower(nameStack[i])
+									if strings.Contains(mLower, "ship") || strings.Contains(mLower, "cluster") || strings.Contains(mLower, "sector") || strings.Contains(mLower, "station") || strings.Contains(mLower, "vault") {
+										page := strings.TrimLeft(match[1], "0")
+										if page == "" && match[1] != "" {
+											page = "0"
 										}
-										break
+										mappings[mLower] = [2]string{page, match[2]}
 									}
+									break
 								}
 							}
 						}
 					}
-				case xml.EndElement:
-					if len(nameStack) > 0 {
-						nameStack = nameStack[:len(nameStack)-1]
-					}
+				}
+			case xml.EndElement:
+				if len(nameStack) > 0 {
+					nameStack = nameStack[:len(nameStack)-1]
 				}
 			}
 		}
-		return nil
-	})
+		f.Close()
+	}
+
 	if onProgress != nil {
 		onProgress(100.0)
 	}

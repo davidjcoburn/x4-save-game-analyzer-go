@@ -32,15 +32,16 @@ func ExtractGameData(gameRoot string, openFolder func() (string, error)) error {
 		if openFolder != nil {
 			fmt.Println("Please select your X4 Foundations root directory in the dialog...")
 			p, err := openFolder()
-			if err != nil {
+			if err != nil && !strings.Contains(err.Error(), "not implemented") {
 				return fmt.Errorf("failed to open folder dialog: %w", err)
 			}
-			if p == "" {
-				return fmt.Errorf("no directory selected")
+			if p != "" {
+				gameRoot = p
 			}
-			gameRoot = p
-		} else {
-			// Fallback for non-interactive or non-supported platforms
+		}
+
+		// Fallback for non-interactive, non-supported platforms, or if dialog was cancelled/not implemented
+		if gameRoot == "" {
 			reader := bufio.NewReader(os.Stdin)
 			fmt.Print("Enter the path to your X4 Foundations root directory: ")
 			gameRoot, _ = reader.ReadString('\n')

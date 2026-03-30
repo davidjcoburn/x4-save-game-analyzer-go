@@ -18,7 +18,7 @@ const (
 // Interesting component classes for hierarchy tracking.
 var (
 	shipClasses    = map[string]bool{"ship": true, "ship_s": true, "ship_m": true, "ship_l": true, "ship_xl": true}
-	stationClasses = map[string]bool{"station": true}
+	stationClasses = map[string]bool{"station": true, "weaponplatform": true}
 	vaultClasses   = map[string]bool{"datavault": true}
 )
 
