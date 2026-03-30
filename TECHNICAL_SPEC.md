@@ -18,7 +18,8 @@ The **X4 Save Game Analyzer** is a high-performance ETL (Extract, Transform, Loa
 The orchestrator responsible for user interaction and data presentation.
 *   **Flag Parser:** Utilizes the standard `flag` package to handle scanning flags (`-ship`, `-khaak`, `-unowned`, `-vaults`, `-path`).
 *   **Interactive Mode:** Automatically triggers if no `-path` is provided, using a platform-specific file dialog.
-*   **Platform-Specific Dialogs:** Uses build tags (`//go:build windows` and `//go:build !windows`) to provide a native OpenFileDialog on Windows via PowerShell, while remaining portable.
+*   **Persistent Search Loop:** When searching for ships in interactive mode, the tool maintains a loop allowing repeated queries (Name, Macro, or ID) against in-memory data.
+*   **Platform-Specific Dialogs:** Uses build tags (`//go:build windows` and `//go:build !windows`) to provide native OpenFileDialog and FolderBrowserDialog on Windows via PowerShell.
 *   **Data Formatting:** Implements conversion logic for game-specific units in `internal/analyzer/utils.go`:
     *   **Credits:** Converts centicredits to Credits ($1/100$ scaling).
     *   **Time:** Converts raw seconds into a `Dd Hh Mm Ss` format.
@@ -26,14 +27,21 @@ The orchestrator responsible for user interaction and data presentation.
 
 ### 2.2 Core Scanner (`internal/analyzer/parser.go`)
 A memory-efficient, streaming parser utilizing a "pull" XML model.
-*   **Memory Management:** Uses `xml.Decoder` to iterate through tokens without loading the full XML DOM. It maintains a near-constant memory footprint regardless of the XML size.
-*   **Hierarchy Resolution:** Maintains a map (`idToInfo`) of component IDs to their parents, classes, and local positions. For memory efficiency, it only stores components necessary for hierarchy tracking (clusters, sectors, and their parents).
-*   **Macro Resolution:** Uses an embedded `macro_map.json` (via `go:embed`) to resolve internal macro names to human-readable labels.
+*   **Memory Management:** Uses `xml.Decoder` to iterate through tokens without loading the full XML DOM.
+*   **Collection Strategy:** If a ship search is requested, the scanner collects *all* ships during the initial pass to enable near-instantaneous filtering in the interactive loop.
+*   **Hierarchy Resolution:** Maintains a map (`idToInfo`) of component IDs to their parents, classes, and local positions.
+    *   **Connection Offsets:** Correctly handles offsets in both `<connection>` and `<component>` tags using a tag stack.
+    *   **Sector-Relative Coordinates:** Summation stops at the `sector` level to ensure coordinates match the in-game map.
+*   **Macro Resolution:** Uses an embedded `macro_map.json` (via `go:embed`) or a local override to resolve internal macro names to human-readable labels.
 
 ### 2.3 Macro Map Builder (`internal/analyzer/build_map.go`)
-An optional utility to rebuild the internal macro database from game data.
-*   **Efficiency:** Uses a single-pass `filepath.Walk` to scan game data directories for both translation files (`0001.xml`) and macro definition files.
-*   **Resolution:** Recursively resolves nested translation tags (e.g., `{20001, 101}`).
+A utility to rebuild the internal macro database from game data.
+*   **Efficiency:** Uses a single-pass `filepath.WalkDir` to collect XML files, followed by a processing pass with a progress indicator.
+*   **Data Sources:**
+    *   **Translations:** Parses `0001.xml` files for localized strings.
+    *   **Macros:** Parses component macro files for `identification` tags (supporting both localized references and literal names).
+    *   **Wares:** Parses `wares.xml` to link ship macros to their market names (critical for story ships like the Hyperion/Trinity).
+*   **Resolution:** Recursively resolves nested translation tags and strips redundant X4 metadata (voice hints, comment tags) using balanced parenthesis logic.
 
 ---
 
@@ -43,28 +51,25 @@ An optional utility to rebuild the internal macro database from game data.
 1.  **Initialization:** Loads the macro map from either a local file or the embedded default.
 2.  **Streaming Loop:** Iterates through XML tokens. When a `<component>` start element is encountered:
     *   Attributes (ID, class, macro, owner, name, code) are extracted.
-    *   The component is pushed onto a stack to track parent-child relationships.
-    *   The component is registered in the hierarchy map.
-    *   If the component matches active search criteria (e.g., `owner="ownerless"`), it is added to the results buffer.
-3.  **Position Extraction:** When a `<position>` tag is found, its `x,y,z` values are associated with the current component in the hierarchy map.
-4.  **Final Resolution:** Once the stream ends, the analyzer traces the parent hierarchy for each result to calculate global sector coordinates and identify the system/sector names.
-
-### 3.2 Global Coordinate Calculation
-Coordinates in X4 are stored relative to the immediate parent. The analyzer calculates the global sector position by summing local offsets up the hierarchy:
-$$Pos_{global} = \sum_{i=0}^{n} Pos_{local\_i}$$
-where $n$ represents the depth of the component within the sector hierarchy.
+    *   A tag stack ensures `<position>` tags are attributed to the correct parent (connection vs component).
+    *   If the component is "interesting" (ship, station, module), it is registered in the hierarchy map.
+3.  **Position Extraction:** Offsets are accumulated using a `pendingPos` buffer that is flushed into components or cleared when connections end to prevent "offset leakage".
+4.  **Final Resolution:** Traces the parent hierarchy for each result to calculate sector-relative coordinates and identify system names.
 
 ---
 
 ## 4. Performance & Scalability
 *   **Time Complexity:** $O(N)$ where $N$ is the number of XML nodes.
-*   **Space Complexity:** $O(M)$ where $M$ is the number of components tracked in the hierarchy map (significantly smaller than the full XML DOM).
-*   **Efficiency:** Processes large compressed save files (100MB+ compressed, 1GB+ uncompressed) in seconds. Memory usage is stabilized by the streaming decoder.
+*   **Space Complexity:** $O(M)$ where $M$ is the number of components tracked in the hierarchy map.
+*   **Efficiency:** Processes 1GB+ uncompressed XML in ~20-25 seconds on modern hardware. Repeated ship searches in the interactive loop take <1ms.
 
 ---
 
 ## 5. Maintenance & Supportability
-*   **Coding Standards:** Adheres to idiomatic Go standards, including full documentation for exported symbols and `go fmt` formatting.
-*   **Extensibility:** New scan types can be added by updating `constants.go` and adding filter conditions in `parser.go`.
-*   **Decoupled Data:** Macro resolution is decoupled from the main logic, allowing for easy updates via the `-build-map` flag if game data changes.
-*   **Testing:** Includes a comprehensive test suite (`internal/analyzer/parser_test.go`) that validates hierarchy resolution and scanning logic against mock XML data.
+*   **Coding Standards:** Adheres to Go standards, including documentation for exported symbols and `go fmt`.
+*   **Extensibility:** Manual overrides in `BuildMacroMap` allow for quick fixes to special story ships or mod-added content that breaks standard naming conventions.
+*   **Testing:** Comprehensive test suite (`parser_test.go`, `build_map_test.go`, `utils_test.go`) validates:
+    *   Scanning logic and criteria filtering.
+    *   Hierarchy and connection offset summation.
+    *   Offset leak prevention.
+    *   Macro map resolution and string cleaning.

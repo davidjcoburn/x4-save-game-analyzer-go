@@ -7,11 +7,12 @@ A Go-based tool for analyzing X4: Foundations save games.
 - High-performance streaming XML parsing.
 - Memory efficient (processes large saves without loading the full XML into memory).
 - Supports `.xml.gz` and `.xml` formats.
+- Real-time progress indicators for scanning and map building.
 - Scans for:
     - Kha'ak Hives and Nests.
     - Unowned (Abandoned) Ships.
     - Data Vaults (Decrypted status and locations).
-    - Ship search by name/macro/code.
+    - Ship search by name, macro, or ship ID.
 
 ## Usage
 
@@ -30,7 +31,7 @@ go build -o x4-analyzer.exe ./cmd/analyzer
 ### Flags
 
 - `-path`: Path to the X4 save game file.
-- `-ship`: Search for a ship by name.
+- `-ship`: Search for a ship by name or ID.
 - `-khaak`: Scan for Kha'ak targets.
 - `-unowned`: Search for unowned/abandoned ships.
 - `-vaults`: List all Data Vaults.
@@ -71,10 +72,13 @@ To resolve internal macro names (e.g., `ship_arg_l_destroyer_01_macro`) into hum
 If no `-path` is provided, the tool enters interactive mode:
 1.  **File Selection:** A native OpenFileDialog opens (Windows).
 2.  **Criteria Menu:** A CLI menu allows selecting scan targets (Kha'ak, Unowned, Vaults, Ship Search).
+3.  **Ship Search Loop:** If ship search is selected, the tool enters a persistent loop allowing you to search for multiple ships by name or ID without re-scanning the save file.
 
-- `cmd/analyzer/`: Entry point for the CLI tool.
-- `internal/analyzer/`: Core parsing and analysis logic.
-- `macro_map.json`: Data file for mapping internal macros to human-readable names.
+## Project Structure
+
+- `cmd/analyzer/`: Entry point for the CLI tool and platform-specific dialogs.
+- `internal/analyzer/`: Core parsing, analysis logic, and macro builder.
+- `internal/analyzer/macro_map.json`: Default data file for mapping internal macros to human-readable names.
 - `TECHNICAL_SPEC.md`: Detailed technical specification.
 
 ## Performance
