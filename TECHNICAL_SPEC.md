@@ -5,9 +5,9 @@ The **X4 Save Game Analyzer** is a high-performance ETL (Extract, Transform, Loa
 
 ### Key Technologies
 *   **Language:** Go (Golang) 1.21+
-*   **XML Engine:** `encoding/xml` (Streaming `xml.Decoder`)
-*   **Compression:** `compress/gzip` (Standard library)
-*   **UI/UX:** CLI with platform-specific native file dialogs (PowerShell on Windows)
+*   **XML Engine:** High-performance streaming byte-slice tokenizer with zero-allocation attribute scanning
+*   **Compression:** `github.com/klauspost/compress/gzip` with buffered stream pipeline
+*   **UI/UX:** CLI with platform-specific native file dialogs (PowerShell STA on Windows)
 *   **Static Assets:** `go:embed` for internal data files
 
 ---
@@ -21,15 +21,15 @@ The orchestrator responsible for user interaction and data presentation.
 *   **Persistent Search Loop:** When searching for ships in interactive mode, the tool maintains a loop allowing repeated queries (Name, Macro, or ID) against in-memory data.
 *   **Platform-Specific Dialogs:** Uses build tags (`//go:build windows` and `//go:build !windows`) to provide native OpenFileDialog and FolderBrowserDialog on Windows via PowerShell.
 *   **Data Formatting:** Implements conversion logic for game-specific units in `internal/analyzer/utils.go`:
-    *   **Credits:** Converts centicredits to Credits ($1/100$ scaling).
-    *   **Time:** Converts raw seconds into a `Dd Hh Mm Ss` format.
-    *   **Coordinates:** Converts meters to kilometers for spatial reporting.
+    *   **Credits:** Converts centicredits to Credits ($1/100$ scaling) with comma-separated thousands formatting.
+    *   **Time:** Converts raw seconds into a `Dd Hh Mm Ss` format with proper zero-unit handling.
+    *   **Coordinates:** Converts meters to kilometers for spatial reporting, avoiding negative zero artifacts.
 
 ### 2.2 Core Scanner (`internal/analyzer/parser.go`)
-A memory-efficient, streaming parser utilizing a "pull" XML model.
-*   **Memory Management:** Uses `xml.Decoder` to iterate through tokens without loading the full XML DOM.
-*   **Collection Strategy:** If a ship search is requested, the scanner collects *all* ships during the initial pass to enable near-instantaneous filtering in the interactive loop.
-*   **Hierarchy Resolution:** Maintains a map (`idToInfo`) of component IDs to their parents, classes, and local positions.
+A memory-efficient, streaming parser utilizing a pull-based byte-slice model.
+*   **Memory Management:** Iterates through tag slices with zero-allocation key parsing and dynamic hash table allocation to minimize GC overhead.
+*   **Collection Strategy:** If a ship search is requested, the scanner collects all ships during the initial pass to enable near-instantaneous filtering in the interactive loop.
+*   **Hierarchy Resolution:** Maintains a map (`idToInfo`) of component IDs to their parents, classes, and local positions with cycle protection.
     *   **Connection Offsets:** Correctly handles offsets in both `<connection>` and `<component>` tags using a tag stack.
     *   **Sector-Relative Coordinates:** Summation stops at the `sector` level to ensure coordinates match the in-game map.
 *   **Macro Resolution:** Uses an embedded `macro_map.json` (via `go:embed`) or a local override to resolve internal macro names to human-readable labels.

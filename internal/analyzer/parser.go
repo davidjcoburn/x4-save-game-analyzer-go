@@ -2,16 +2,56 @@
 package analyzer
 
 import (
-	"compress/gzip"
+	"bufio"
+	"bytes"
 	_ "embed"
 	"encoding/json"
-	"encoding/xml"
 	"fmt"
 	"io"
 	"os"
 	"strconv"
 	"strings"
+
+	"github.com/klauspost/compress/gzip"
 )
+
+func isShipClass(c string) bool {
+	switch c {
+	case "ship", "ship_s", "ship_m", "ship_l", "ship_xl":
+		return true
+	}
+	return false
+}
+
+func isStationClass(c string) bool {
+	switch c {
+	case "station", "weaponplatform":
+		return true
+	}
+	return false
+}
+
+func isVaultClass(c string) bool {
+	return c == "datavault"
+}
+
+func isModuleClass(c string) bool {
+	switch c {
+	case "module", "production", "storage", "dockarea", "defence":
+		return true
+	}
+	return false
+}
+
+func isHierarchyClass(c string) bool {
+	switch c {
+	case "galaxy", "cluster", "sector", "station", "weaponplatform", "datavault",
+		"ship", "ship_s", "ship_m", "ship_l", "ship_xl",
+		"module", "production", "storage", "dockarea", "defence", "highway", "":
+		return true
+	}
+	return false
+}
 
 //go:embed macro_map.json
 var defaultMacroMap []byte
@@ -82,7 +122,9 @@ func (s *X4SaveScanner) resolveHierarchy(targetID string, idToInfo map[string]co
 	foundSector := false
 
 	traceID := targetID
-	for traceID != "" {
+	depth := 0
+	for traceID != "" && depth < 64 {
+		depth++
 		info, ok := idToInfo[traceID]
 		if !ok {
 			break
@@ -98,10 +140,11 @@ func (s *X4SaveScanner) resolveHierarchy(targetID string, idToInfo map[string]co
 				sectorCode = info.macro
 			}
 			foundSector = true
+			traceID = info.parent
 			continue // Don't add the sector's own position to the sector-relative sum
 		}
 
-		if !foundSector && info.pos != nil {
+		if !foundSector && info.hasPos {
 			sectorPos.X += info.pos.X
 			sectorPos.Y += info.pos.Y
 			sectorPos.Z += info.pos.Z
@@ -140,87 +183,204 @@ func (s *X4SaveScanner) Scan(findShips, findKhaak, findUnowned, findVault bool, 
 		reader = NewProgressReader(f, totalSize, onProgress)
 	}
 
+	bufferedCompressed := bufio.NewReaderSize(reader, 512*1024)
+
 	if strings.HasSuffix(s.filePath, ".gz") {
-		gz, err := gzip.NewReader(reader)
+		gz, err := gzip.NewReader(bufferedCompressed)
 		if err != nil {
 			return nil, fmt.Errorf("failed to initialize gzip reader: %w", err)
 		}
 		defer gz.Close()
 		reader = gz
+	} else {
+		reader = bufferedCompressed
 	}
 
 	return s.ScanReader(reader, findShips, findKhaak, findUnowned, findVault)
 }
 
+// lastWhitespaceIndex returns the last index of whitespace (' ', '\t', '\r', '\n') in b.
+func lastWhitespaceIndex(b []byte) int {
+	for i := len(b) - 1; i >= 0; i-- {
+		switch b[i] {
+		case ' ', '\t', '\r', '\n':
+			return i
+		}
+	}
+	return -1
+}
+
+// parseAttrs iterates over the attributes and calls the callback for each key-value pair without heap-allocating keys.
+func parseAttrs(attrs []byte, cb func(k, v []byte)) {
+	for len(attrs) > 0 {
+		eqIdx := bytes.IndexByte(attrs, '=')
+		if eqIdx == -1 {
+			break
+		}
+
+		keyBytes := bytes.TrimSpace(attrs[:eqIdx])
+		if wsIdx := lastWhitespaceIndex(keyBytes); wsIdx != -1 {
+			keyBytes = keyBytes[wsIdx+1:]
+		}
+
+		attrs = attrs[eqIdx+1:]
+
+		quoteIdx := -1
+		var quote byte
+		for i, b := range attrs {
+			if b == '"' || b == '\'' {
+				quoteIdx = i
+				quote = b
+				break
+			}
+		}
+
+		if quoteIdx == -1 {
+			break
+		}
+
+		attrs = attrs[quoteIdx+1:]
+		endQuoteIdx := bytes.IndexByte(attrs, quote)
+		if endQuoteIdx == -1 {
+			break
+		}
+
+		cb(keyBytes, attrs[:endQuoteIdx])
+		attrs = attrs[endQuoteIdx+1:]
+	}
+}
+
+var (
+	bID     = []byte("id")
+	bClass  = []byte("class")
+	bMacro  = []byte("macro")
+	bOwner  = []byte("owner")
+	bName   = []byte("name")
+	bCode   = []byte("code")
+	bState  = []byte("state")
+	bRead   = []byte("read")
+	bX      = []byte("x")
+	bY      = []byte("y")
+	bZ      = []byte("z")
+)
+
 // ScanReader performs the analysis on an io.Reader stream based on the provided criteria.
 func (s *X4SaveScanner) ScanReader(reader io.Reader, findShips, findKhaak, findUnowned, findVault bool) (*AnalysisResults, error) {
 	results := NewAnalysisResults()
-	idToInfo := make(map[string]componentInfo)
+	idToInfo := make(map[string]componentInfo, 131072)
 
-	decoder := xml.NewDecoder(reader)
 	parentStack := make([]string, 0, 16) // Stack of component IDs
-	tagStack := make([]string, 0, 32)    // Stack of XML tag names
+	isCompStack := make([]bool, 0, 16)   // true if component, false if connection
 	pendingPos := Vector3{}
 
+	br := bufio.NewReaderSize(reader, 1024*1024) // 1MB read buffer
+
+	var tComponent = []byte("component")
+	var tConnection = []byte("connection")
+	var tPosition = []byte("position")
+	var tGame = []byte("game")
+	var tPlayer = []byte("player")
+	var tSave = []byte("save")
+
 	for {
-		token, err := decoder.Token()
-		if err == io.EOF {
-			break
-		}
+		tagData, err := br.ReadSlice('>')
 		if err != nil {
-			return nil, fmt.Errorf("error decoding XML: %w", err)
+			if err == io.EOF {
+				break
+			}
+			// If buffer fills before '>' (extremely rare), fall back to ReadBytes
+			if err == bufio.ErrBufferFull {
+				br.ReadBytes('>')
+				continue
+			}
+			return nil, fmt.Errorf("error reading xml stream: %w", err)
 		}
 
-		switch t := token.(type) {
-		case xml.StartElement:
-			localName := t.Name.Local
-			tagStack = append(tagStack, localName)
+		startIdx := bytes.IndexByte(tagData, '<')
+		if startIdx == -1 {
+			continue
+		}
 
-			if localName == "component" {
+		inner := tagData[startIdx+1 : len(tagData)-1]
+		if len(inner) == 0 {
+			continue
+		}
+
+		isEnd := inner[0] == '/'
+		if isEnd {
+			inner = inner[1:]
+		}
+
+		isSelfClosing := false
+		if len(inner) > 0 && inner[len(inner)-1] == '/' {
+			isSelfClosing = true
+			inner = inner[:len(inner)-1]
+		}
+		if len(inner) > 0 && inner[len(inner)-1] == '?' {
+			continue
+		}
+
+		spaceIdx := bytes.IndexByte(inner, ' ')
+		var tagName []byte
+		var tagAttrs []byte
+		if spaceIdx == -1 {
+			tagName = inner
+		} else {
+			tagName = inner[:spaceIdx]
+			tagAttrs = inner[spaceIdx+1:]
+		}
+
+		if !isEnd {
+			// Start Element Processing
+			if bytes.Equal(tagName, tComponent) {
+				isCompStack = append(isCompStack, true)
 				var cid, class, macro, owner, name, code, state, readStatus string
-				for _, attr := range t.Attr {
-					switch attr.Name.Local {
-					case "id":
-						cid = attr.Value
-					case "class":
-						class = attr.Value
-					case "macro":
-						macro = attr.Value
-					case "owner":
-						owner = attr.Value
-					case "name":
-						name = attr.Value
-					case "code":
-						code = attr.Value
-					case "state":
-						state = attr.Value
-					case "read":
-						readStatus = attr.Value
+
+				parseAttrs(tagAttrs, func(k, v []byte) {
+					switch {
+					case bytes.Equal(k, bID):
+						cid = string(v)
+					case bytes.Equal(k, bClass):
+						class = string(v)
+					case bytes.Equal(k, bMacro):
+						macro = string(v)
+					case bytes.Equal(k, bOwner):
+						owner = string(v)
+					case bytes.Equal(k, bName):
+						name = string(v)
+					case bytes.Equal(k, bCode):
+						code = string(v)
+					case bytes.Equal(k, bState):
+						state = string(v)
+					case bytes.Equal(k, bRead):
+						readStatus = string(v)
 					}
-				}
+				})
 
 				parentID := ""
 				if len(parentStack) > 0 {
 					parentID = parentStack[len(parentStack)-1]
 				}
 
-				// For now, let's at least ensure we only store what's needed for hierarchy.
-				isShip := shipClasses[class]
-				isStation := stationClasses[class]
-				isVault := vaultClasses[class]
-				isModule := (class == "module" || class == "production" || class == "storage" || class == "dockarea" || class == "defence")
+				isShip := isShipClass(class)
+				isStation := isStationClass(class)
+				isVault := isVaultClass(class)
+				isModule := isModuleClass(class)
 
-				initialPos := pendingPos
+				hasPos := pendingPos.X != 0 || pendingPos.Y != 0 || pendingPos.Z != 0
 				info := componentInfo{
 					parent: parentID,
 					class:  class,
 					macro:  macro,
 					code:   code,
-					pos:    &initialPos,
+					pos:    pendingPos,
+					hasPos: hasPos,
 				}
 				pendingPos = Vector3{} // Reset for next component
 
-				idToInfo[cid] = info
+				if cid != "" {
+					idToInfo[cid] = info
+				}
 				parentStack = append(parentStack, cid)
 
 				if findKhaak && owner == "khaak" && (isStation || isModule) {
@@ -280,66 +440,73 @@ func (s *X4SaveScanner) ScanReader(reader io.Reader, findShips, findKhaak, findU
 					})
 				}
 
-			} else if localName == "position" {
-				var pos Vector3
-				for _, attr := range t.Attr {
-					val, _ := strconv.ParseFloat(attr.Value, 64)
-					switch attr.Name.Local {
-					case "x":
-						pos.X = val
-					case "y":
-						pos.Y = val
-					case "z":
-						pos.Z = val
+				if isSelfClosing {
+					// Treat it as an immediate end element
+					if len(parentStack) > 0 {
+						parentStack = parentStack[:len(parentStack)-1]
+					}
+					if len(isCompStack) > 0 {
+						isCompStack = isCompStack[:len(isCompStack)-1]
 					}
 				}
 
-				// Look back in tagStack to see if we are in a connection or component's offset
-				isCompPos := false
-				for i := len(tagStack) - 1; i >= 0; i-- {
-					if tagStack[i] == "component" {
-						isCompPos = true
-						break
+			} else if bytes.Equal(tagName, tConnection) {
+				isCompStack = append(isCompStack, false)
+				if isSelfClosing {
+					if len(isCompStack) > 0 {
+						isCompStack = isCompStack[:len(isCompStack)-1]
 					}
-					if tagStack[i] == "connection" {
-						isCompPos = false
-						break
-					}
+					pendingPos = Vector3{}
 				}
+			} else if bytes.Equal(tagName, tPosition) {
+				var pos Vector3
+				parseAttrs(tagAttrs, func(k, v []byte) {
+					val, _ := strconv.ParseFloat(string(v), 64)
+					switch {
+					case bytes.Equal(k, bX):
+						pos.X = val
+					case bytes.Equal(k, bY):
+						pos.Y = val
+					case bytes.Equal(k, bZ):
+						pos.Z = val
+					}
+				})
+
+				isCompPos := len(isCompStack) > 0 && isCompStack[len(isCompStack)-1]
 
 				if isCompPos && len(parentStack) > 0 {
 					cid := parentStack[len(parentStack)-1]
-					info := idToInfo[cid]
-					if info.pos == nil {
-						info.pos = &Vector3{}
+					if info, ok := idToInfo[cid]; ok {
+						info.pos.X += pos.X
+						info.pos.Y += pos.Y
+						info.pos.Z += pos.Z
+						info.hasPos = true
+						idToInfo[cid] = info
 					}
-					info.pos.X += pos.X
-					info.pos.Y += pos.Y
-					info.pos.Z += pos.Z
-					idToInfo[cid] = info
 				} else {
 					pendingPos.X += pos.X
 					pendingPos.Y += pos.Y
 					pendingPos.Z += pos.Z
 				}
-			} else if localName == "game" || localName == "player" || localName == "save" {
-				// Capture basic save attributes
-				for _, attr := range t.Attr {
-					results.Info[localName+"_"+attr.Name.Local] = attr.Value
-				}
+			} else if bytes.Equal(tagName, tGame) || bytes.Equal(tagName, tPlayer) || bytes.Equal(tagName, tSave) {
+				keyPrefix := string(tagName) + "_"
+				parseAttrs(tagAttrs, func(k, v []byte) {
+					results.Info[keyPrefix+string(k)] = string(v)
+				})
 			}
-
-		case xml.EndElement:
-			localName := t.Name.Local
-			if len(tagStack) > 0 {
-				tagStack = tagStack[:len(tagStack)-1]
-			}
-
-			if localName == "component" {
+		} else {
+			// End Element Processing
+			if bytes.Equal(tagName, tComponent) {
 				if len(parentStack) > 0 {
 					parentStack = parentStack[:len(parentStack)-1]
 				}
-			} else if localName == "connection" {
+				if len(isCompStack) > 0 {
+					isCompStack = isCompStack[:len(isCompStack)-1]
+				}
+			} else if bytes.Equal(tagName, tConnection) {
+				if len(isCompStack) > 0 {
+					isCompStack = isCompStack[:len(isCompStack)-1]
+				}
 				pendingPos = Vector3{} // Clear any unconsumed offset to prevent leakage
 			}
 		}

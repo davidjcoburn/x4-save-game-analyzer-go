@@ -3,11 +3,13 @@ package main
 
 import (
 	"bufio"
+	"cmp"
 	"flag"
 	"fmt"
 	"log"
 	"os"
-	"sort"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -39,26 +41,35 @@ func main() {
 		return
 	}
 
-	if *path == "" {
+	noPathSupplied := *path == ""
+	if noPathSupplied {
 		isInteractive = true
 		p, err := openFileDialog()
 		if err != nil {
 			fmt.Printf("Error opening file dialog: %v\n", err)
+			pauseBeforeExit()
 			return
 		}
 		if p == "" {
 			fmt.Println("No file selected. Exiting.")
+			pauseBeforeExit()
 			return
 		}
 		*path = p
 	}
 
+	shipSearchRequested := *ship != ""
 	if !*khaak && !*unowned && !*vaults && *ship == "" {
 		isInteractive = true
-		interactiveMenu(ship, khaak, unowned, vaults)
+		shipSearchRequested = interactiveMenu(ship, khaak, unowned, vaults)
 	}
 
 	if _, err := os.Stat(*path); os.IsNotExist(err) {
+		if noPathSupplied {
+			fmt.Printf("Error: Save file not found at %s\n", *path)
+			pauseBeforeExit()
+			return
+		}
 		log.Fatalf("Error: Save file not found at %s", *path)
 	}
 
@@ -66,15 +77,20 @@ func main() {
 	fmt.Printf("File: %s\n\n", *path)
 
 	startTime := time.Now()
-	scanner := analyzer.NewX4SaveScanner(*path)
-	
+	saveScanner := analyzer.NewX4SaveScanner(*path)
+
 	onProgress := func(percent float64) {
 		fmt.Printf("\rScanning... %.0f%%", percent)
 	}
 
-	results, err := scanner.Scan(*ship != "" || isInteractive, *khaak, *unowned, *vaults, onProgress)
+	results, err := saveScanner.Scan(shipSearchRequested, *khaak, *unowned, *vaults, onProgress)
 	if err != nil {
 		fmt.Println() // Newline after progress
+		if noPathSupplied {
+			fmt.Printf("An error occurred during analysis: %v\n", err)
+			pauseBeforeExit()
+			return
+		}
 		log.Fatalf("An error occurred during analysis: %v", err)
 	}
 	fmt.Printf("\rScanning... 100%%\n")
@@ -99,12 +115,12 @@ func main() {
 		printKhaak(results)
 	}
 
-	if isInteractive {
+	if isInteractive && shipSearchRequested {
+		stdinScanner := bufio.NewScanner(os.Stdin)
 		for {
 			fmt.Print("\nEnter ship name or ID to search for (blank to exit): ")
-			scanner := bufio.NewScanner(os.Stdin)
-			if scanner.Scan() {
-				query := strings.TrimSpace(scanner.Text())
+			if stdinScanner.Scan() {
+				query := strings.TrimSpace(stdinScanner.Text())
 				if query == "" {
 					break
 				}
@@ -114,6 +130,15 @@ func main() {
 			}
 		}
 	}
+
+	if noPathSupplied {
+		pauseBeforeExit()
+	}
+}
+
+func pauseBeforeExit() {
+	fmt.Print("\nPress Enter to exit...")
+	bufio.NewReader(os.Stdin).ReadBytes('\n')
 }
 
 func handleBuildMap() {
@@ -164,10 +189,10 @@ func printBaseInfo(results *analyzer.AnalysisResults, duration time.Duration) {
 
 	saveDate := info["save_date"]
 	if saveDate != "" {
-		var ts int64
-		fmt.Sscanf(saveDate, "%d", &ts)
-		dt := time.Unix(ts, 0)
-		fmt.Printf("  Save Date:    %s\n", dt.Format("2006-01-02 15:04:05"))
+		if ts, err := strconv.ParseInt(saveDate, 10, 64); err == nil {
+			dt := time.Unix(ts, 0)
+			fmt.Printf("  Save Date:    %s\n", dt.Format("2006-01-02 15:04:05"))
+		}
 	}
 }
 
@@ -183,8 +208,8 @@ func printShipSearch(results *analyzer.AnalysisResults, shipQuery string) {
 	}
 
 	fmt.Printf("\nShip search for '%s' (%d found):\n", shipQuery, len(matched))
-	sort.Slice(matched, func(i, j int) bool {
-		return matched[i].Name < matched[j].Name
+	slices.SortFunc(matched, func(a, b analyzer.ScanResult) int {
+		return cmp.Compare(a.Name, b.Name)
 	})
 	for _, s := range matched {
 		wreckStr := ""
@@ -200,11 +225,11 @@ func printShipSearch(results *analyzer.AnalysisResults, shipQuery string) {
 func printUnowned(results *analyzer.AnalysisResults) {
 	ships := results.Unowned
 	fmt.Printf("\nAbandoned ships (%d found):\n", len(ships))
-	sort.Slice(ships, func(i, j int) bool {
-		if ships[i].System != ships[j].System {
-			return ships[i].System < ships[j].System
+	slices.SortFunc(ships, func(a, b analyzer.ScanResult) int {
+		if c := cmp.Compare(a.System, b.System); c != 0 {
+			return c
 		}
-		return ships[i].Name < ships[j].Name
+		return cmp.Compare(a.Name, b.Name)
 	})
 	for _, s := range ships {
 		fmt.Printf("  - %s (%s) ID: %s\n", s.Name, s.Class, s.Code)
@@ -216,11 +241,11 @@ func printUnowned(results *analyzer.AnalysisResults) {
 func printVaults(results *analyzer.AnalysisResults) {
 	v := results.Vaults
 	fmt.Printf("\nData Vaults (%d found):\n", len(v))
-	sort.Slice(v, func(i, j int) bool {
-		if v[i].System != v[j].System {
-			return v[i].System < v[j].System
+	slices.SortFunc(v, func(a, b analyzer.ScanResult) int {
+		if c := cmp.Compare(a.System, b.System); c != 0 {
+			return c
 		}
-		return v[i].Sector < v[j].Sector
+		return cmp.Compare(a.Sector, b.Sector)
 	})
 	for _, val := range v {
 		statusStr := " [LOCKED]"
@@ -235,24 +260,31 @@ func printVaults(results *analyzer.AnalysisResults) {
 func printKhaak(results *analyzer.AnalysisResults) {
 	targets := results.Khaak
 	fmt.Printf("\nKha'ak Intelligence Report:\n")
-	var hives, nests []analyzer.ScanResult
+	var hives, nests, installations []analyzer.ScanResult
 	for _, t := range targets {
-		if t.Type == "Hive" {
+		switch t.Type {
+		case "Hive":
 			hives = append(hives, t)
-		} else if t.Type == "Nest" {
+		case "Nest":
 			nests = append(nests, t)
+		default:
+			installations = append(installations, t)
 		}
 	}
 	fmt.Printf("  Total Hives:         %d\n", len(hives))
 	fmt.Printf("  Total Nests:         %d\n", len(nests))
+	if len(installations) > 0 {
+		fmt.Printf("  Other Installations: %d\n", len(installations))
+	}
+	fmt.Printf("  Total Detected:      %d\n", len(targets))
 
 	if len(targets) > 0 {
 		fmt.Printf("\nDetected Locations (Global Sector Coordinates):\n")
-		sort.Slice(targets, func(i, j int) bool {
-			if targets[i].Type != targets[j].Type {
-				return targets[i].Type < targets[j].Type
+		slices.SortFunc(targets, func(a, b analyzer.ScanResult) int {
+			if c := cmp.Compare(a.Type, b.Type); c != 0 {
+				return c
 			}
-			return targets[i].System < targets[j].System
+			return cmp.Compare(a.System, b.System)
 		})
 		for _, t := range targets {
 			wreckStr := ""
@@ -266,7 +298,8 @@ func printKhaak(results *analyzer.AnalysisResults) {
 }
 
 // interactiveMenu presents a CLI menu for selecting analysis criteria when no flags are provided.
-func interactiveMenu(ship *string, khaak *bool, unowned *bool, vaults *bool) {
+// Returns true if ship search was selected.
+func interactiveMenu(ship *string, khaak *bool, unowned *bool, vaults *bool) bool {
 	fmt.Println("\n--- X4 Save Game Analyzer (Interactive Mode) ---")
 	fmt.Println("Select search criteria (comma-separated numbers):")
 	fmt.Println("1. Kha'ak Intelligence Report (Hives & Nests)")
@@ -276,16 +309,18 @@ func interactiveMenu(ship *string, khaak *bool, unowned *bool, vaults *bool) {
 	fmt.Println("5. All of the above")
 
 	fmt.Print("\nChoice [1-5]: ")
-	scanner := bufio.NewScanner(os.Stdin)
-	if scanner.Scan() {
-		choice := scanner.Text()
+	menuScanner := bufio.NewScanner(os.Stdin)
+	shipRequested := false
+	if menuScanner.Scan() {
+		choice := menuScanner.Text()
 		*khaak = strings.Contains(choice, "1") || strings.Contains(choice, "5")
 		*unowned = strings.Contains(choice, "2") || strings.Contains(choice, "5")
 		*vaults = strings.Contains(choice, "3") || strings.Contains(choice, "5")
 		if strings.Contains(choice, "4") || strings.Contains(choice, "5") {
+			shipRequested = true
 			fmt.Print("Enter ship name or ID to search for (or leave blank): ")
-			if scanner.Scan() {
-				*ship = strings.TrimSpace(scanner.Text())
+			if menuScanner.Scan() {
+				*ship = strings.TrimSpace(menuScanner.Text())
 			}
 		}
 	}
@@ -294,4 +329,5 @@ func interactiveMenu(ship *string, khaak *bool, unowned *bool, vaults *bool) {
 	if !*khaak && !*unowned && !*vaults && *ship == "" {
 		*khaak = true
 	}
+	return shipRequested
 }
