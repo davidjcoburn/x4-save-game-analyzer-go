@@ -10,11 +10,25 @@ import (
 	"strings"
 )
 
+// findCatTool looks for XRCatTool.exe near the running binary or in the working directory.
+func findCatTool() string {
+	if exePath, err := os.Executable(); err == nil {
+		toolPath := filepath.Join(filepath.Dir(exePath), "XRCatTool.exe")
+		if _, err := os.Stat(toolPath); err == nil {
+			return toolPath
+		}
+	}
+	if _, err := os.Stat("XRCatTool.exe"); err == nil {
+		return "XRCatTool.exe"
+	}
+	return ""
+}
+
 // ExtractGameData handles the extraction of .cat files using XRCatTool.exe.
 func ExtractGameData(gameRoot string, openFolder func() (string, error)) error {
-	catTool := "./XRCatTool.exe"
-	if _, err := os.Stat(catTool); os.IsNotExist(err) {
-		fmt.Println("Error: XRCatTool.exe not found in the current directory.")
+	catTool := findCatTool()
+	if catTool == "" {
+		fmt.Println("Error: XRCatTool.exe not found.")
 		fmt.Println("Please download 'X Catalog Tool' from Egosoft's official website:")
 		fmt.Println("https://www.egosoft.com/download/x4/bonus_en.php")
 		fmt.Println("(You must be logged in to your Egosoft account to see the download link)")

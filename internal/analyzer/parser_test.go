@@ -38,7 +38,7 @@ func TestBasicScan(t *testing.T) {
 	}
 
 	reader := strings.NewReader(sampleXML)
-	results, err := scanner.ScanReader(reader, "MyShip", false, false, false)
+	results, err := scanner.ScanReader(reader, true, false, false, false)
 	if err != nil {
 		t.Fatalf("ScanReader failed: %v", err)
 	}
@@ -100,7 +100,7 @@ func TestExtendedScan(t *testing.T) {
 	}
 
 	reader := strings.NewReader(sampleXML)
-	results, err := scanner.ScanReader(reader, "", true, true, true)
+	results, err := scanner.ScanReader(reader, false, true, true, true)
 	if err != nil {
 		t.Fatalf("ScanReader failed: %v", err)
 	}
@@ -155,8 +155,8 @@ func TestConnectionOffsets(t *testing.T) {
 	scanner.macroMap = map[string]string{"cluster_name": "Test System"}
 
 	reader := strings.NewReader(sampleXML)
-	// We use shipQuery="station" to catch our mock station
-	results, err := scanner.ScanReader(reader, "station", false, false, false)
+	// We use findShips=true to catch our mock ship (since we changed the mock to a ship later)
+	results, err := scanner.ScanReader(reader, true, false, false, false)
 	if err != nil {
 		t.Fatalf("ScanReader failed: %v", err)
 	}
@@ -189,7 +189,7 @@ func TestConnectionOffsets(t *testing.T) {
 </save>
 `
 	reader = strings.NewReader(sampleXMLShip)
-	results, err = scanner.ScanReader(reader, "ship", false, false, false)
+	results, err = scanner.ScanReader(reader, true, false, false, false)
 	if err != nil {
 		t.Fatalf("ScanReader failed: %v", err)
 	}
@@ -229,7 +229,7 @@ func TestConnectionOffsetLeak(t *testing.T) {
 `
 	scanner := NewX4SaveScanner("dummy.xml")
 	reader := strings.NewReader(sampleXML)
-	results, err := scanner.ScanReader(reader, "ship", false, false, false)
+	results, err := scanner.ScanReader(reader, true, false, false, false)
 	if err != nil {
 		t.Fatalf("ScanReader failed: %v", err)
 	}
@@ -242,5 +242,70 @@ func TestConnectionOffsetLeak(t *testing.T) {
 	// With the fix, it should be at 2000.
 	if results.Ships[0].Pos.X != 2000 {
 		t.Errorf("Expected X position 2000, got %v (potential offset leak!)", results.Ships[0].Pos.X)
+	}
+}
+
+// TestResolveHierarchyCycleProtection verifies that circular references terminate gracefully.
+func TestResolveHierarchyCycleProtection(t *testing.T) {
+	scanner := NewX4SaveScanner("dummy.xml")
+	idToInfo := map[string]componentInfo{
+		"a": {parent: "b", class: "station"},
+		"b": {parent: "c", class: "station"},
+		"c": {parent: "a", class: "station"}, // Cycle: a -> b -> c -> a
+	}
+
+	sector, system, _ := scanner.resolveHierarchy("a", idToInfo)
+	if sector != "Unknown" || system != "Unknown" {
+		t.Errorf("Expected Unknown sector/system for cyclic hierarchy, got %s / %s", sector, system)
+	}
+}
+
+// TestSectorUnknownLoopAdvancement verifies that resolveHierarchy terminates even if sector evaluates to Unknown.
+func TestSectorUnknownLoopAdvancement(t *testing.T) {
+	scanner := NewX4SaveScanner("dummy.xml")
+	idToInfo := map[string]componentInfo{
+		"ship1": {parent: "sec1", class: "ship_s"},
+		"sec1":  {parent: "clu1", class: "sector", macro: ""}, // macro and code are empty
+		"clu1":  {parent: "", class: "cluster", macro: "clu_macro"},
+	}
+	scanner.macroMap = map[string]string{
+		"clu_macro": "Grand System",
+	}
+
+	_, system, _ := scanner.resolveHierarchy("ship1", idToInfo)
+	if system != "Grand System" {
+		t.Errorf("Expected system 'Grand System', got %q", system)
+	}
+}
+
+func BenchmarkScanReader(b *testing.B) {
+	sampleXML := `<?xml version="1.0" encoding="UTF-8"?>
+<save>
+    <universe>
+        <component id="clu" class="cluster" macro="cluster_name">
+            <component id="sec" class="sector" macro="sector_name" code="SEC_01">
+                <connections>
+                    <connection name="con_ship_01">
+                        <offset><position x="5000" y="0" z="0"/></offset>
+                        <component id="ship1" class="ship_l" macro="ship_macro" owner="player">
+                            <offset><position x="100" y="200" z="300"/></offset>
+                        </component>
+                    </connection>
+                </connections>
+            </component>
+        </component>
+    </universe>
+</save>
+`
+	scanner := NewX4SaveScanner("dummy.xml")
+	scanner.macroMap = map[string]string{"cluster_name": "Test System"}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		reader := strings.NewReader(sampleXML)
+		_, err := scanner.ScanReader(reader, true, false, false, false)
+		if err != nil {
+			b.Fatalf("ScanReader failed: %v", err)
+		}
 	}
 }

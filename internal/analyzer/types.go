@@ -11,10 +11,11 @@ type Vector3 struct {
 // componentInfo is an internal structure used to store intermediate component data.
 type componentInfo struct {
 	parent string
-	pos    *Vector3
 	class  string
 	macro  string
 	code   string
+	pos    Vector3
+	hasPos bool
 }
 
 // ScanResult contains information about a specific component found in the save game.

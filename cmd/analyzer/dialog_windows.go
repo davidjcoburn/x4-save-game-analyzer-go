@@ -34,7 +34,7 @@ func openFileDialog() (string, error) {
 		if($res -eq 'OK') { $f.FileName }
 	`
 
-	cmd := exec.Command("powershell", "-NoProfile", "-Command", psScript)
+	cmd := exec.Command("powershell", "-NoProfile", "-Sta", "-Command", psScript)
 	cmd.Env = append(os.Environ(), "TARGET_INIT_DIR="+initialDir)
 
 	var out bytes.Buffer
@@ -64,7 +64,7 @@ func openFolderDialog() (string, error) {
 		if($res -eq 'OK') { $f.SelectedPath }
 	`
 
-	cmd := exec.Command("powershell", "-NoProfile", "-Command", psScript)
+	cmd := exec.Command("powershell", "-NoProfile", "-Sta", "-Command", psScript)
 	var out bytes.Buffer
 	var errOut bytes.Buffer
 	cmd.Stdout = &out
